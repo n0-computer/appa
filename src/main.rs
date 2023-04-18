@@ -1,8 +1,9 @@
 use std::rc::Rc;
 
 use anyhow::Result;
+use appa::hash_manifest;
 use chrono::Utc;
-use wnfs::{libipld::Cid, public::PublicDirectory};
+use wnfs::{common::BlockStore, public::PublicDirectory};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -20,10 +21,13 @@ async fn main() -> Result<()> {
         .await?;
 
     // Add a file to /pictures/dogs directory.
+    let content_cid = store
+        .put_block(b"Hi billie".to_vec(), libipld::IpldCodec::Raw.into())
+        .await?;
     root_dir
         .write(
             &["pictures".into(), "dogs".into(), "billie.jpeg".into()],
-            Cid::default(),
+            content_cid,
             Utc::now(),
             &store,
         )
@@ -48,6 +52,9 @@ async fn main() -> Result<()> {
         root_cid,
         store.get_path(&root_cid.to_string())?.display()
     );
+
+    let manifest = hash_manifest::walk_dag(store, root_cid)?;
+    println!("{manifest:#?}");
 
     Ok(())
 }
