@@ -107,9 +107,10 @@ impl Flatfs {
         Ok(value)
     }
 
-    /// Open the file under the given key in read-only mode.
-    pub fn get_as_file(&self, key: &str) -> Result<Option<File>> {
-        let filepath = self.as_path(key);
+    /// Open the underlying file for a block in read-only mode.
+    pub fn get_block_as_file(&self, cid: cid::Cid) -> Result<Option<File>> {
+        let key = Self::key_for_cid(cid);
+        let filepath = self.as_path(&key);
 
         let value = retry(|| match fs::File::open(&filepath) {
             Ok(res) => Ok(Some(res)),

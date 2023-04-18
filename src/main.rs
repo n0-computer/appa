@@ -86,6 +86,14 @@ enum Commands {
         #[clap(long)]
         auth_token: Option<String>,
     },
+
+    #[cfg(feature = "fuse")]
+    /// Mount with FUSE
+    Mount {
+        /// Directory to mount at
+        #[arg(value_name = "MOUNTPOINT")]
+        mountpoint: String
+    }
 }
 
 #[tokio::main]
@@ -243,6 +251,12 @@ async fn main() -> Result<()> {
                     res?;
                 }
             }
+        }
+
+        #[cfg(feature = "fuse")]
+        Commands::Mount { mountpoint } => {
+            let fs = Fs::load(&ROOT_DIR).await?;
+            appa::fuse::mount(fs, mountpoint)?;
         }
     }
 
