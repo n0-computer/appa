@@ -179,8 +179,8 @@ async fn main() -> Result<()> {
                         } else {
                             let index = usize::try_from(data.offset() - 1)?;
                             let hash = data.user.as_ref().unwrap().blobs()[index].hash;
-                            let _bytes = data.read_blob(hash).await?;
-                            todo!("add hash and bytes to store");
+                            let _ = data.read_blob(hash).await?;
+                            println!("got blob for hash {hash:?}");
                         }
                         data.end()
                     },
@@ -210,6 +210,12 @@ async fn main() -> Result<()> {
                 custom_handler,
             )
             .await?;
+
+            let addrs = provider.listen_addresses()?;
+            println!("real addrs:");
+            for addr in addrs {
+                println!("{addr}");
+            }
 
             let provider2 = provider.clone();
             tokio::select! {
