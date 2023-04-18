@@ -8,7 +8,7 @@ use wnfs::{libipld::Cid, public::PublicDirectory};
 async fn main() -> Result<()> {
     println!("Hello, world from appa!");
 
-    let dir = "appa-store";
+    let dir = ".appa-store";
     let mut store = appa::store::Store::new(dir)?;
 
     // Create a new directory.
