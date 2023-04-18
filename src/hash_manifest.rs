@@ -22,6 +22,10 @@ impl HashManifest {
         }
     }
 
+    pub fn extend(&mut self, other: Self) {
+        self.hashes.extend(other.hashes);
+    }
+
     pub fn without(&self, manifest: &HashManifest) -> HashManifest {
         HashManifest::new(
             self.hashes

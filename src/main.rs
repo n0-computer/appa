@@ -6,6 +6,7 @@ use appa::fs::Fs;
 use appa::{hash_manifest::HashManifest, store::Store};
 use bytes::Bytes;
 use futures::FutureExt;
+use iroh::provider::DataSource;
 use iroh::{
     porcelain::provide,
     protocol::GetRequest,
@@ -149,7 +150,7 @@ async fn main() -> Result<()> {
             auth_token,
         } => {
             let fs = Fs::load(&ROOT_DIR).await?;
-            let manifest = fs.manifest_public()?;
+            let manifest = fs.manifest()?;
             let store = fs.store().clone();
             // pull hashes from store & put hashes in a vec
             let mut opts = iroh::get::Options {
@@ -184,7 +185,12 @@ async fn main() -> Result<()> {
                             } else {
                                 let index = usize::try_from(data.offset() - 1)?;
                                 let hash = data.user.as_ref().unwrap().blobs()[index].hash;
-                                let key = Store::key_for_hash(hash.as_ref());
+                                let name = &data.user.as_ref().unwrap().blobs()[index].name;
+                                let key = if name == appa::fs::LATEST {
+                                    name.into()
+                                } else {
+                                    Store::key_for_hash(hash.as_ref())
+                                };
                                 let content = data.read_blob(hash).await?;
                                 tracing::debug!("received blob for hash {hash:?}");
                                 tokio::task::spawn_blocking(move || {
@@ -202,7 +208,7 @@ async fn main() -> Result<()> {
         }
         Commands::Provide { addr, auth_token } => {
             let fs = Fs::load(&ROOT_DIR).await?;
-            let manifest = fs.manifest_public()?;
+            let manifest = fs.manifest()?;
 
             let db = Database::default();
             let custom_handler = CollectionMirrorHandler {
@@ -256,11 +262,18 @@ impl CustomHandler for CollectionMirrorHandler {
         database: &Database,
     ) -> futures::future::BoxFuture<'static, anyhow::Result<GetRequest>> {
         let database = database.clone();
-        let sulf = self.clone();
+        let this = self.clone();
+
         async move {
             let requestor_manifest: HashManifest = postcard::from_bytes(&data)?;
-            let diff = sulf.manifest.without(&requestor_manifest);
-            let sources = diff.to_sources(&sulf.store)?;
+            let diff = this.manifest.without(&requestor_manifest);
+            let mut sources = diff.to_sources(&this.store)?;
+
+            let path = this.store.get_path(appa::fs::LATEST)?;
+            sources.push(DataSource::NamedFile {
+                name: appa::fs::LATEST.into(),
+                path,
+            });
 
             let (new_db, hash) = create_collection(sources).await?;
             let new_db = new_db.to_inner();
