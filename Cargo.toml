@@ -16,11 +16,12 @@ chrono = "0.4.24"
 cid = "0.10.1"
 clap = { version = "4.2.2", features = ["derive"] }
 ignore = "0.4.20"
+iroh = { git = "https://github.com/n0-computer/iroh.git", branch = "ramfox/porcelain"}
 libipld = "0.16.0"
+postcard = { version = "1", default-features = false, features = ["alloc", "use-std"] }
 serde = { version = "1", features = ["derive"] }
 tokio = { version = "1.27.0", features = ["full"] }
 wnfs = "0.1.20"
-iroh = { git = "https://github.com/n0-computer/iroh.git", branch = "ramfox/porcelain"}
 
 [dev-dependencies]
 tempfile = "3.5.0"

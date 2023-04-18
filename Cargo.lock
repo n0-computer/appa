@@ -165,6 +165,7 @@ dependencies = [
  "ignore",
  "iroh",
  "libipld",
+ "postcard",
  "serde",
  "tempfile",
  "tokio",

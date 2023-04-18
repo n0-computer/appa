@@ -1,6 +1,6 @@
-use std::{net::SocketAddr, path::PathBuf, rc::Rc};
+use std::{net::SocketAddr, path::PathBuf, rc::Rc, str::FromStr};
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use appa::hash_manifest;
 use bytes::Bytes;
 use chrono::Utc;
@@ -175,34 +175,58 @@ async fn main() -> Result<()> {
             let manifest = hash_manifest::walk_dag(store, root)?;
             println!("{manifest:#?}");
         }
-        Commands::Pull { .. } => {
-            // let mut opts = get::Options {
-            //     peer_id: Some(peer),
-            //     keylog: cli.keylog,
-            //     ..Default::default()
-            // };
-            // if let Some(addr) = addr {
-            //     opts.addr = addr;
-            // }
-            // let token = AuthToken::from_str(&auth_token)
-            //     .context("Wrong format for authentication token")?;
-            // let get = GetInteractive::Hash {
-            //     hash: *hash.as_hash(),
-            //     opts,
-            //     token,
-            //     single,
-            // };
-            // tokio::select! {
-            //     biased;
-            //     res = get_interactive(get, out) => res,
-            //     _ = tokio::signal::ctrl_c() => {
-            //         println!("Ending transfer early...");
-            //         Ok(())
-            //     }
-            // }
-            todo!();
+        Commands::Pull {
+            peer,
+            addr,
+            auth_token,
+        } => {
+            let (mut store, root_dir) = ensure_store(&ROOT_DIR).await?;
+            // pull hashes from store & put hashes in a vec
+            let mut opts = iroh::get::Options {
+                peer_id: Some(peer),
+                ..Default::default()
+            };
+            if let Some(addr) = addr {
+                opts.addr = addr;
+            };
+            let token = iroh::protocol::AuthToken::from_str(&auth_token)
+                .context("Wrong format for authentication token")?;
+            let root = root_dir.store(&mut store).await?;
+            let manifest = hash_manifest::walk_dag(store, root)?;
+
+            let buf = postcard::to_stdvec(&manifest)?;
+            tokio::select! {
+                biased;
+                _ = tokio::signal::ctrl_c() => {
+                    println!("interupting pull");
+                }
+                res = iroh::get::run(
+                    Bytes::from(buf).into(),
+                    token,
+                    opts,
+                    || async move { Ok(()) },
+                    move |mut data| async move {
+                        if data.is_root() {
+                            let hash = data.request().name;
+                            let collection = data.read_collection(hash).await?;
+                            data.set_limit(collection.total_entries() + 1);
+                            data.user = Some(collection);
+                        } else {
+                            let index = usize::try_from(data.offset() - 1)?;
+                            let hash = data.user.as_ref().unwrap().blobs()[index].hash;
+                            let _bytes = data.read_blob(hash).await?;
+                            todo!("add hash and bytes to store");
+                        }
+                        data.end()
+                    },
+                    None,
+                ) => {
+                    res?;
+                }
+            };
         }
         Commands::Provide { addr, auth_token } => {
+            let (mut _store, _root_dir) = ensure_store(&ROOT_DIR).await?;
             let db = Database::default();
             let custom_handler = CollectionMirrorHandler;
             let provider = provide(
