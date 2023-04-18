@@ -44,6 +44,13 @@ enum Commands {
         #[arg(value_name = "PATH")]
         path: String,
     },
+    /// Move from source to destination.
+    Mv {
+        #[arg(value_name = "SOURCE")]
+        source: String,
+        #[arg(value_name = "DESTINATION")]
+        dest: String,
+    },
     /// Print a manifest
     Manifest,
 }
@@ -85,6 +92,11 @@ async fn main() -> Result<()> {
             let fs = Fs::load(&ROOT_DIR).await?;
             let content = fs.cat(path).await?;
             tokio::io::stdout().write_all(&content).await?;
+        }
+        Commands::Mv { source, dest } => {
+            let mut fs = Fs::load(&ROOT_DIR).await?;
+            fs.mv(source, dest).await?;
+            fs.commit().await?;
         }
         Commands::Manifest => {
             let fs = Fs::load(&ROOT_DIR).await?;

@@ -276,6 +276,40 @@ impl Fs {
         }
     }
 
+    pub async fn mv(&mut self, source: String, target: String) -> Result<()> {
+        let source = PathSegments::from_path(source)?;
+        let target = PathSegments::from_path(target)?;
+
+        match (source, target) {
+            (PathSegments::Root, _) | (_, PathSegments::Root) => {
+                anyhow::bail!("cannot modify /");
+            }
+            (PathSegments::Public(source), PathSegments::Public(target)) => {
+                self.public
+                    .basic_mv(&source, &target, Utc::now(), &self.store)
+                    .await?;
+            }
+            (PathSegments::Private(source), PathSegments::Private(target)) => {
+                self.private
+                    .basic_mv(
+                        &source,
+                        &target,
+                        true,
+                        Utc::now(),
+                        &mut self.private_forest,
+                        &mut self.store,
+                        &mut rand::thread_rng(),
+                    )
+                    .await?;
+            }
+            _ => {
+                anyhow::bail!("cannot move between /public and /private");
+            }
+        }
+
+        Ok(())
+    }
+
     pub fn manifest(&self) -> Result<()> {
         let manifest = crate::hash_manifest::walk_dag(&self.store, self.commit.public)?;
         println!("public manifest: {manifest:#?}");
@@ -353,6 +387,13 @@ mod tests {
         let text = fs.cat("/private/foo/hello.txt".into()).await?;
         assert_eq!(text, b"hello world");
 
+        fs.mv("/private/foo".into(), "/private/bar".into()).await?;
+
+        let text = fs.cat("/private/bar/hello.txt".into()).await?;
+        assert_eq!(text, b"hello world");
+
+        fs.commit().await?;
+
         // Public
         fs.mkdir("/public/foo".into()).await?;
         let list = fs.ls("/public".into()).await?;
@@ -364,6 +405,12 @@ mod tests {
         let text = fs.cat("/public/foo/hello.txt".into()).await?;
         assert_eq!(text, b"hello world");
 
+        fs.mv("/public/foo".into(), "/public/bar".into()).await?;
+
+        let text = fs.cat("/public/bar/hello.txt".into()).await?;
+        assert_eq!(text, b"hello world");
+
+        fs.commit().await?;
         Ok(())
     }
 }
