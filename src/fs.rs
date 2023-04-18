@@ -1,4 +1,7 @@
-use std::{path::PathBuf, rc::Rc};
+use std::{
+    path::{Path, PathBuf},
+    rc::Rc,
+};
 
 use anyhow::{Context as _, Result};
 use chrono::Utc;
@@ -56,10 +59,7 @@ pub struct Fs {
 }
 
 impl Fs {
-    pub async fn init(dir: &str) -> Result<Fs> {
-        if PathBuf::from(dir).exists() {
-            anyhow::bail!("already initialized");
-        }
+    pub async fn init(dir: impl AsRef<Path>) -> Result<Fs> {
         let store = store::Store::new(dir)?;
         let public_root_dir = Rc::new(PublicDirectory::new(Utc::now()));
         let private_forest = Rc::new(PrivateForest::new());
@@ -81,8 +81,8 @@ impl Fs {
         Ok(fs)
     }
 
-    pub async fn load(dir: &str) -> Result<Self> {
-        let path = PathBuf::from(dir);
+    pub async fn load(dir: &impl AsRef<Path>) -> Result<Self> {
+        let path = PathBuf::from(dir.as_ref());
         anyhow::ensure!(
             path.exists(),
             "Appa is not initialized, please call 'appa init'"
@@ -113,8 +113,11 @@ impl Fs {
         let private_node = PrivateNode::load(&private_ref, &private_forest, &store)
             .await
             .context("private")?;
-        let private_root_dir = private_node.as_dir()?;
         let private_forest = Rc::new(private_forest);
+
+        // Update to the latest
+        let private_node = private_node.search_latest(&private_forest, &store).await?;
+        let private_root_dir = private_node.as_dir()?;
 
         Ok(Fs {
             store,
@@ -331,5 +334,36 @@ mod tests {
         );
 
         assert!(PathSegments::from_path("/foo/bar".into()).is_err());
+    }
+
+    #[tokio::test]
+    async fn test_basics() -> Result<()> {
+        let dir = tempfile::tempdir().unwrap();
+
+        let mut fs = Fs::init(&dir).await?;
+
+        // Private
+        fs.mkdir("/private/foo".into()).await?;
+        let list = fs.ls("/private".into()).await?;
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].0, "foo");
+
+        fs.add("/private/foo/hello.txt".into(), "hello world".into())
+            .await?;
+        let text = fs.cat("/private/foo/hello.txt".into()).await?;
+        assert_eq!(text, b"hello world");
+
+        // Public
+        fs.mkdir("/public/foo".into()).await?;
+        let list = fs.ls("/public".into()).await?;
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].0, "foo");
+
+        fs.add("/public/foo/hello.txt".into(), "hello world".into())
+            .await?;
+        let text = fs.cat("/public/foo/hello.txt".into()).await?;
+        assert_eq!(text, b"hello world");
+
+        Ok(())
     }
 }
