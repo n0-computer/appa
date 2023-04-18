@@ -150,6 +150,7 @@ async fn main() -> Result<()> {
         } => {
             let fs = Fs::load(&ROOT_DIR).await?;
             let manifest = fs.manifest_public()?;
+            let store = fs.store().clone();
             // pull hashes from store & put hashes in a vec
             let mut opts = iroh::get::Options {
                 peer_id: Some(peer),
@@ -172,19 +173,26 @@ async fn main() -> Result<()> {
                     token,
                     opts,
                     || async move { Ok(()) },
-                    move |mut data| async move {
-                        if data.is_root() {
-                            let hash = data.request().name;
-                            let collection = data.read_collection(hash).await?;
-                            data.set_limit(collection.total_entries() + 1);
-                            data.user = Some(collection);
-                        } else {
-                            let index = usize::try_from(data.offset() - 1)?;
-                            let hash = data.user.as_ref().unwrap().blobs()[index].hash;
-                            let _ = data.read_blob(hash).await?;
-                            println!("got blob for hash {hash:?}");
+                    move |mut data| {
+                        let store = store.clone();
+                        async move {
+                            if data.is_root() {
+                                let hash = data.request().name;
+                                let collection = data.read_collection(hash).await?;
+                                data.set_limit(collection.total_entries() + 1);
+                                data.user = Some(collection);
+                            } else {
+                                let index = usize::try_from(data.offset() - 1)?;
+                                let hash = data.user.as_ref().unwrap().blobs()[index].hash;
+                                let key = Store::key_for_hash(hash.as_ref());
+                                let content = data.read_blob(hash).await?;
+                                tracing::debug!("received blob for hash {hash:?}");
+                                tokio::task::spawn_blocking(move || {
+                                    store.put(&key, content)
+                                }).await??;
+                            }
+                            data.end()
                         }
-                        data.end()
                     },
                     None,
                 ) => {
