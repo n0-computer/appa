@@ -13,17 +13,18 @@ use wnfs::{
     public::PublicDirectory,
 };
 
-use crate::store;
+use crate::{hash_manifest::HashManifest, store};
 
-const LATEST: &str = "LATEST_COMMIT";
+/// Key for the latest commit stored in the database.
+pub const LATEST: &str = "LATEST_COMMIT";
 
-#[derive(Debug, serde::Serialize, serde::Deserialize)]
-struct Commit {
-    public: Cid,
-    private_saturated_name_hash: HashOutput,
-    private_temporal_key: TemporalKey,
-    private_content_cid: Cid,
-    private_forest: Cid,
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct Commit {
+    pub public: Cid,
+    pub private_saturated_name_hash: HashOutput,
+    pub private_temporal_key: TemporalKey,
+    pub private_content_cid: Cid,
+    pub private_forest: Cid,
 }
 
 impl Default for Commit {
@@ -39,11 +40,11 @@ impl Default for Commit {
 }
 
 impl Commit {
-    fn to_vec(&self) -> Vec<u8> {
+    pub fn to_vec(&self) -> Vec<u8> {
         postcard::to_stdvec(&self).unwrap()
     }
 
-    fn from_bytes(bytes: &[u8]) -> Result<Self> {
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
         let res = postcard::from_bytes(&bytes)?;
         Ok(res)
     }
@@ -310,14 +311,28 @@ impl Fs {
         Ok(())
     }
 
-    pub fn manifest(&self) -> Result<()> {
-        let manifest = crate::hash_manifest::walk_dag(&self.store, self.commit.public)?;
-        println!("public manifest: {manifest:#?}");
+    pub fn manifest(&self) -> Result<HashManifest> {
+        let mut public = self.manifest_public()?;
+        let private = self.manifest_private()?;
 
-        let manifest = crate::hash_manifest::walk_dag(&self.store, self.commit.private_forest)?;
-        println!("private manifest: {manifest:#?}");
+        public.extend(private);
+        Ok(public)
+    }
 
-        Ok(())
+    pub fn manifest_public(&self) -> Result<HashManifest> {
+        crate::hash_manifest::walk_dag(&self.store, self.commit.public)
+    }
+
+    pub fn manifest_private(&self) -> Result<HashManifest> {
+        crate::hash_manifest::walk_dag(&self.store, self.commit.private_forest)
+    }
+
+    pub fn store(&self) -> &store::Store {
+        &self.store
+    }
+
+    pub fn current_commit(&self) -> &Commit {
+        &self.commit
     }
 }
 

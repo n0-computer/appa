@@ -3,14 +3,14 @@ use cid::Cid;
 use libipld::{prelude::References, Ipld, IpldCodec};
 use std::{collections::BTreeSet, io::Cursor};
 
-use iroh::Hash;
+use iroh::{provider::DataSource, Hash};
 use serde::{Deserialize, Serialize};
 
 use crate::store::Store;
 
 const BLAKE3_MC: u64 = 0x1e;
 
-#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HashManifest {
     hashes: Vec<Hash>,
 }
@@ -22,6 +22,10 @@ impl HashManifest {
         }
     }
 
+    pub fn extend(&mut self, other: Self) {
+        self.hashes.extend(other.hashes);
+    }
+
     pub fn without(&self, manifest: &HashManifest) -> HashManifest {
         HashManifest::new(
             self.hashes
@@ -29,6 +33,17 @@ impl HashManifest {
                 .filter(|hash| !manifest.hashes.contains(hash))
                 .cloned(),
         )
+    }
+
+    pub fn to_sources(&self, store: &Store) -> Result<Vec<DataSource>> {
+        let mut sources = Vec::new();
+
+        for hash in self.hashes.iter() {
+            let path = store.get_path(&Store::key_for_hash(hash.as_ref()))?;
+            sources.push(DataSource::File(path));
+        }
+
+        Ok(sources)
     }
 }
 

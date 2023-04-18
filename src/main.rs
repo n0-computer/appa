@@ -1,7 +1,21 @@
+use std::sync::Arc;
+use std::{net::SocketAddr, str::FromStr};
+
 use anyhow::{Context as _, Result};
 use appa::fs::Fs;
-use clap::{Parser, Subcommand};
+use appa::{hash_manifest::HashManifest, store::Store};
+use bytes::Bytes;
+use futures::FutureExt;
+use iroh::provider::DataSource;
+use iroh::{
+    porcelain::provide,
+    protocol::GetRequest,
+    provider::{create_collection, CustomHandler, Database},
+    PeerId,
+};
 use tokio::io::AsyncWriteExt;
+
+use clap::{Parser, Subcommand};
 use tracing_subscriber::{prelude::*, EnvFilter};
 
 #[derive(Debug, Parser)]
@@ -53,6 +67,25 @@ enum Commands {
     },
     /// Print a manifest
     Manifest,
+    /// Pull any missing files from the node
+    Pull {
+        #[clap(long, short)]
+        peer: PeerId,
+        /// The authentication token to present to the server.
+        #[clap(long)]
+        auth_token: String,
+        /// Optional address of the provider, defaults to 127.0.0.1:4433.
+        #[clap(long, short)]
+        addr: Option<SocketAddr>,
+    },
+    /// Provide
+    Provide {
+        #[clap(long, short)]
+        addr: Option<SocketAddr>,
+        /// Auth token, defaults to random generated.
+        #[clap(long)]
+        auth_token: Option<String>,
+    },
 }
 
 #[tokio::main]
@@ -105,9 +138,150 @@ async fn main() -> Result<()> {
         }
         Commands::Manifest => {
             let fs = Fs::load(&ROOT_DIR).await?;
-            fs.manifest()?;
+            let manifest = fs.manifest_public()?;
+            println!("public manifest: {manifest:#?}");
+
+            let manifest = fs.manifest_private()?;
+            println!("private manifest: {manifest:#?}");
+        }
+        Commands::Pull {
+            peer,
+            addr,
+            auth_token,
+        } => {
+            let fs = Fs::load(&ROOT_DIR).await?;
+            let manifest = fs.manifest()?;
+            let store = fs.store().clone();
+            // pull hashes from store & put hashes in a vec
+            let mut opts = iroh::get::Options {
+                peer_id: Some(peer),
+                ..Default::default()
+            };
+            if let Some(addr) = addr {
+                opts.addr = addr;
+            };
+            let token = iroh::protocol::AuthToken::from_str(&auth_token)
+                .context("Wrong format for authentication token")?;
+
+            let buf = postcard::to_stdvec(&manifest)?;
+            tokio::select! {
+                biased;
+                _ = tokio::signal::ctrl_c() => {
+                    println!("interupting pull");
+                }
+                res = iroh::get::run(
+                    Bytes::from(buf).into(),
+                    token,
+                    opts,
+                    || async move { Ok(()) },
+                    move |mut data| {
+                        let store = store.clone();
+                        async move {
+                            if data.is_root() {
+                                let hash = data.request().name;
+                                let collection = data.read_collection(hash).await?;
+                                data.set_limit(collection.total_entries() + 1);
+                                data.user = Some(collection);
+                            } else {
+                                let index = usize::try_from(data.offset() - 1)?;
+                                let hash = data.user.as_ref().unwrap().blobs()[index].hash;
+                                let name = &data.user.as_ref().unwrap().blobs()[index].name;
+                                let key = if name == appa::fs::LATEST {
+                                    name.into()
+                                } else {
+                                    Store::key_for_hash(hash.as_ref())
+                                };
+                                let content = data.read_blob(hash).await?;
+                                tracing::debug!("received blob for hash {hash:?}");
+                                tokio::task::spawn_blocking(move || {
+                                    store.put(&key, content)
+                                }).await??;
+                            }
+                            data.end()
+                        }
+                    },
+                    None,
+                ) => {
+                    res?;
+                }
+            };
+        }
+        Commands::Provide { addr, auth_token } => {
+            let fs = Fs::load(&ROOT_DIR).await?;
+            let manifest = fs.manifest()?;
+
+            let db = Database::default();
+            let custom_handler = CollectionMirrorHandler {
+                manifest: Arc::new(manifest),
+                store: fs.store().clone(),
+            };
+            let provider = provide(
+                db.clone(),
+                addr,
+                auth_token,
+                None,
+                false,
+                None,
+                custom_handler,
+            )
+            .await?;
+
+            let addrs = provider.listen_addresses()?;
+            println!("real addrs:");
+            for addr in addrs {
+                println!("{addr}");
+            }
+
+            let provider2 = provider.clone();
+            tokio::select! {
+                biased;
+                _ = tokio::signal::ctrl_c() => {
+                    println!("Shutting down provider...");
+                    provider2.shutdown();
+                }
+                res = provider => {
+                    res?;
+                }
+            }
         }
     }
 
     Ok(())
+}
+
+#[derive(Clone, Debug)]
+struct CollectionMirrorHandler {
+    manifest: Arc<HashManifest>,
+    store: Store,
+}
+
+impl CustomHandler for CollectionMirrorHandler {
+    fn handle(
+        &self,
+        data: Bytes,
+        database: &Database,
+    ) -> futures::future::BoxFuture<'static, anyhow::Result<GetRequest>> {
+        let database = database.clone();
+        let this = self.clone();
+
+        async move {
+            let requestor_manifest: HashManifest = postcard::from_bytes(&data)?;
+            let diff = this.manifest.without(&requestor_manifest);
+            let mut sources = diff.to_sources(&this.store)?;
+
+            let path = this.store.get_path(appa::fs::LATEST)?;
+            sources.push(DataSource::NamedFile {
+                name: appa::fs::LATEST.into(),
+                path,
+            });
+
+            let (new_db, hash) = create_collection(sources).await?;
+            let new_db = new_db.to_inner();
+            database.union_with(new_db);
+            let request = GetRequest::all(hash);
+            println!("{:?}", request);
+            Ok(request)
+        }
+        .boxed()
+    }
 }

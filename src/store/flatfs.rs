@@ -243,7 +243,7 @@ impl Flatfs {
     }
 
     pub(crate) fn get_block_sync<'a>(&'a self, cid: cid::Cid) -> Result<Vec<u8>> {
-        match self.get(&cid.to_string()) {
+        match self.get(&Self::key_for_cid(cid)) {
             Ok(Some(res)) => Ok(res),
             Ok(None) => Err(wnfs::error::FsError::NotFound.into()),
             Err(err) => Err(err),
@@ -261,10 +261,18 @@ impl Flatfs {
         )
         .expect("invalid multihash");
         let cid = cid::Cid::new_v1(codec.into(), hash);
-        let key = cid.to_string();
+        let key = Self::key_for_cid(cid);
         self.put(&key, bytes)?;
 
         Ok(cid)
+    }
+
+    pub fn key_for_hash(hash: &[u8]) -> String {
+        hex::encode(hash)
+    }
+
+    pub fn key_for_cid(cid: cid::Cid) -> String {
+        Self::key_for_hash(cid.hash().digest())
     }
 }
 
