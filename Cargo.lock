@@ -160,6 +160,7 @@ dependencies = [
  "blake3",
  "chrono",
  "cid",
+ "clap",
  "ignore",
  "iroh",
  "libipld",
