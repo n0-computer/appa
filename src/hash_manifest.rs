@@ -1,7 +1,7 @@
 use anyhow::{anyhow, Result};
 use cid::Cid;
 use libipld::{prelude::References, Ipld, IpldCodec};
-use std::{collections::BTreeSet, io::Cursor, iter};
+use std::{collections::BTreeSet, io::Cursor};
 
 use iroh::Hash;
 use serde::{Deserialize, Serialize};
@@ -10,7 +10,7 @@ use crate::store::Store;
 
 const BLAKE3_MC: u64 = 0x1e;
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HashManifest {
     hashes: Vec<Hash>,
 }
@@ -22,8 +22,13 @@ impl HashManifest {
         }
     }
 
-    pub fn without(&self, manifest: &HashManifest) -> impl Iterator<Item = Hash> {
-        self.hashes.filter(|hash| !manifest.hashes.contains(hash))
+    pub fn without(&self, manifest: &HashManifest) -> HashManifest {
+        HashManifest::new(
+            self.hashes
+                .iter()
+                .filter(|hash| !manifest.hashes.contains(hash))
+                .cloned(),
+        )
     }
 }
 
@@ -51,4 +56,17 @@ fn references(codec: IpldCodec, block: Vec<u8>) -> Result<impl Iterator<Item = C
     let mut refs = Vec::new();
     <Ipld as References<IpldCodec>>::references(codec, &mut Cursor::new(block), &mut refs)?;
     Ok(refs.into_iter())
+}
+
+#[test]
+fn test_without() {
+    let manifest_one = manifest_from(&["one", "two", "three"]);
+    let manifest_two = manifest_from(&["two", "three", "four"]);
+    let manifest_diff = manifest_one.without(&manifest_two);
+    assert_eq!(manifest_diff, manifest_from(&["one"]));
+}
+
+#[cfg(test)]
+fn manifest_from(stuff: &[&str]) -> HashManifest {
+    HashManifest::new(stuff.iter().map(|s| Hash::new(s.as_bytes())))
 }
