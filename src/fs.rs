@@ -1,5 +1,5 @@
 use std::{
-    io::Cursor,
+    io::{Cursor, Read, Seek, SeekFrom},
     path::{Component, Path, PathBuf},
     rc::Rc,
 };
@@ -15,7 +15,7 @@ use wnfs::{
     common::{BlockStore, HashOutput},
     namefilter::Namefilter,
     private::{AesKey, PrivateDirectory, PrivateForest, PrivateNode, PrivateRef, TemporalKey},
-    public::PublicDirectory,
+    public::{PublicDirectory, PublicNode},
 };
 
 use crate::{hash_manifest::HashManifest, store};
@@ -394,6 +394,111 @@ impl Fs {
 
     pub fn current_commit(&self) -> &Commit {
         &self.commit
+    }
+
+    pub async fn get_node(&self, path: String) -> anyhow::Result<Option<Node>> {
+        let path = PathSegments::from_path(path)?;
+        let node = match path {
+            PathSegments::Root => Some(Node::Root),
+            PathSegments::Private(path) => {
+                let node = self
+                    .private
+                    .get_node(&path, false, &self.private_forest, &self.store)
+                    .await?;
+                let node = node.map(Node::Private);
+                node
+            }
+            PathSegments::Public(path) => {
+                let node = self.public.get_node(&path, &self.store).await?;
+                let node = node.map(|node| Node::Public(node.clone()));
+                node
+            }
+        };
+        Ok(node)
+    }
+
+    pub async fn read_file_at(
+        &self,
+        path: String,
+        offset: usize,
+        size: usize,
+    ) -> anyhow::Result<Vec<u8>> {
+        let node = self.get_node(path).await?;
+        match node {
+            None => Err(anyhow::anyhow!("Not found")),
+            Some(Node::Root)
+            | Some(Node::Private(PrivateNode::Dir(_)))
+            | Some(Node::Public(PublicNode::Dir(_))) => {
+                Err(anyhow::anyhow!("Is a directory, not a file"))
+            }
+            Some(Node::Private(PrivateNode::File(file))) => {
+                file.read_at(offset, size, &self.private_forest, &self.store)
+                    .await
+            }
+            Some(Node::Public(PublicNode::File(file))) => {
+                let cid = file.get_content_cid();
+                let mut file = self
+                    .store
+                    .get_as_file(&cid.to_string())?
+                    .ok_or_else(|| anyhow::anyhow!("Block not found"))?;
+                tokio::task::spawn_blocking(move || {
+                    file.seek(SeekFrom::Start(offset as u64))?;
+                    let mut bytes = vec![0u8; size];
+                    file.read_exact(&mut bytes)?;
+                    Ok(bytes)
+                })
+                .await?
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum Node {
+    Root,
+    Private(PrivateNode),
+    Public(PublicNode),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum NodeKind {
+    Directory,
+    File
+}
+
+impl Node {
+    pub fn kind(&self) -> NodeKind {
+        match self {
+            Node::Root => NodeKind::Directory,
+            Node::Private(PrivateNode::Dir(_)) => NodeKind::Directory,
+            Node::Private(PrivateNode::File(_)) => NodeKind::File,
+            Node::Public(PublicNode::Dir(_)) => NodeKind::Directory,
+            Node::Public(PublicNode::File(_)) => NodeKind::File
+        }
+    }
+
+    pub fn is_dir(&self) -> bool {
+        matches!(self.kind(), NodeKind::Directory)
+    }
+    pub fn is_file(&self) -> bool {
+        matches!(self.kind(), NodeKind::File)
+    }
+
+    pub fn size(&self, fs: &Fs) -> anyhow::Result<u64> {
+        let size = match self {
+            Node::Private(PrivateNode::File(file)) => file.get_content_size_upper_bound() as u64,
+            Node::Public(PublicNode::File(file)) => {
+                let cid = file.get_content_cid();
+                // TODO: Does this need spawn_blocking?
+                let file = fs
+                    .store
+                    .get_as_file(&cid.to_string())?
+                    .ok_or_else(|| anyhow::anyhow!("Block not found"))?;
+                file.metadata()?.len()
+            }
+            Node::Root | Node::Public(PublicNode::Dir(_)) | Node::Private(PrivateNode::Dir(_)) => 0,
+        };
+        Ok(size)
     }
 }
 

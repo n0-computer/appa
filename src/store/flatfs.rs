@@ -1,6 +1,6 @@
 use std::{
     borrow::Cow,
-    fs, io,
+    fs::{self, File}, io,
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicU64, Ordering},
@@ -117,6 +117,24 @@ impl Flatfs {
             }
         })
         .with_context(|| format!("Failed to read {filepath:?}"))?;
+
+        Ok(value)
+    }
+
+    /// Open the file under the given key in read-only mode.
+    pub fn get_as_file(&self, key: &str) -> Result<Option<File>> {
+        let filepath = self.as_path(key);
+
+        let value = retry(|| match fs::File::open(&filepath) {
+            Ok(res) => Ok(Some(res)),
+            Err(err) => {
+                if err.kind() == io::ErrorKind::NotFound {
+                    return Ok(None);
+                }
+                Err(err)
+            }
+        })
+        .with_context(|| format!("Failed to open {filepath:?}"))?;
 
         Ok(value)
     }
