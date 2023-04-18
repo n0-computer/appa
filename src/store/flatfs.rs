@@ -1,7 +1,11 @@
 use std::{
+    borrow::Cow,
     fs, io,
     path::{Path, PathBuf},
-    sync::atomic::{AtomicU64, Ordering},
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc,
+    },
     time::{Duration, SystemTime},
 };
 
@@ -9,14 +13,14 @@ use anyhow::{anyhow, Context, Result};
 
 use super::shard::{self, Shard};
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Flatfs {
     /// Path to the root of the storage on disk.
     path: PathBuf,
     /// The sharding strategy.
     shard: Shard,
     /// Current disk usage in bytes.
-    disk_usage: AtomicU64,
+    disk_usage: Arc<AtomicU64>,
 }
 
 const EXTENSION: &str = "data";
@@ -85,12 +89,20 @@ impl Flatfs {
     }
 
     /// Retrieves the value under the given key.
-    pub fn get(&self, key: &str) -> Result<Vec<u8>> {
+    pub fn get(&self, key: &str) -> Result<Option<Vec<u8>>> {
         ensure_valid_key(key)?;
         let filepath = self.as_path(key);
 
-        let value = retry(|| fs::read(&filepath))
-            .with_context(|| format!("Failed to read {filepath:?}"))?;
+        let value = retry(|| match fs::read(&filepath) {
+            Ok(res) => Ok(Some(res)),
+            Err(err) => {
+                if err.kind() == io::ErrorKind::NotFound {
+                    return Ok(None);
+                }
+                Err(err)
+            }
+        })
+        .with_context(|| format!("Failed to read {filepath:?}"))?;
 
         Ok(value)
     }
@@ -151,7 +163,7 @@ impl Flatfs {
         Ok(Flatfs {
             path: path.as_ref().to_path_buf(),
             shard,
-            disk_usage: AtomicU64::new(disk_usage),
+            disk_usage: Arc::new(AtomicU64::new(disk_usage)),
         })
     }
 
@@ -356,9 +368,54 @@ fn calculate_disk_usage<P: AsRef<Path>>(path: P) -> Result<u64> {
     Ok(disk_usage)
 }
 
+#[async_trait::async_trait(?Send)]
+impl wnfs::common::BlockStore for Flatfs {
+    async fn get_block<'a>(&'a self, cid: &cid::Cid) -> Result<Cow<'a, Vec<u8>>> {
+        let cid = *cid;
+        let self = self.clone();
+        let res = tokio::task::spawn_blocking(move || self.get(&cid.to_string())).await?;
+        match res {
+            Ok(Some(res)) => Ok(Cow::Owned(res)),
+            Ok(None) => Err(wnfs::error::FsError::NotFound.into()),
+            Err(err) => Err(err),
+        }
+    }
+
+    async fn put_block(&mut self, bytes: Vec<u8>, codec: libipld::IpldCodec) -> Result<cid::Cid> {
+        let hash = cid::multihash::Multihash::wrap(
+            cid::multihash::Code::Blake3_256.into(),
+            blake3::hash(&bytes).as_bytes(),
+        )
+        .expect("invalid multihash");
+        let cid = cid::Cid::new_v1(codec.into(), hash);
+        let key = cid.to_string();
+        let self = self.clone();
+        tokio::task::spawn_blocking(move || self.put(&key, bytes)).await??;
+
+        Ok(cid)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn test_blockstore() -> Result<()> {
+        use wnfs::common::BlockStore;
+
+        let dir = tempfile::tempdir().unwrap();
+        let mut flatfs = Flatfs::new(dir.path()).unwrap();
+
+        let data = b"hello world";
+        let cid = flatfs
+            .put_block(data.to_vec(), libipld::IpldCodec::Raw)
+            .await?;
+        let res = flatfs.get_block(&cid).await?;
+        assert_eq!(&res[..], data);
+
+        Ok(())
+    }
 
     #[test]
     fn test_create_empty() {
@@ -419,7 +476,7 @@ mod tests {
         assert_eq!(flatfs.disk_usage(), 10 * 128);
 
         for i in 0..10 {
-            assert_eq!(flatfs.get(&format!("foo{i}")).unwrap(), [i; 128]);
+            assert_eq!(flatfs.get(&format!("foo{i}")).unwrap().unwrap(), [i; 128]);
             assert_eq!(flatfs.get_size(&format!("foo{i}")).unwrap(), 128);
         }
 
@@ -448,7 +505,7 @@ mod tests {
         assert_eq!(flatfs.disk_usage(), 10 * 128);
 
         for i in 0..10 {
-            assert_eq!(flatfs.get(&format!("foo{i}")).unwrap(), [i; 128]);
+            assert_eq!(flatfs.get(&format!("foo{i}")).unwrap().unwrap(), [i; 128]);
         }
 
         for i in 0..5 {
@@ -459,10 +516,10 @@ mod tests {
 
         for i in 0..10 {
             if i < 5 {
-                assert!(flatfs.get(&format!("foo{i}")).is_err());
+                assert!(flatfs.get(&format!("foo{i}")).unwrap().is_none());
                 assert!(flatfs.del(&format!("foo{i}")).is_err());
             } else {
-                assert_eq!(flatfs.get(&format!("foo{i}")).unwrap(), [i; 128]);
+                assert_eq!(flatfs.get(&format!("foo{i}")).unwrap().unwrap(), [i; 128]);
             }
         }
     }
