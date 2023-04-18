@@ -226,11 +226,7 @@ async fn main() -> Result<()> {
             )
             .await?;
 
-            let addrs = provider.listen_addresses()?;
-            println!("real addrs:");
-            for addr in addrs {
-                println!("{addr}");
-            }
+            iroh::porcelain::display_provider_info(&provider)?;
 
             let provider2 = provider.clone();
             tokio::select! {
