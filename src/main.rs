@@ -146,7 +146,7 @@ async fn main() -> Result<()> {
             let (mut store, root_dir) = ensure_store(&ROOT_DIR).await?;
             let root = root_dir.store(&mut store).await?;
             let manifest = hash_manifest::walk_dag(store, root)?;
-            println!("{manifest:?}");
+            println!("{manifest:#?}");
         }
     }
 
