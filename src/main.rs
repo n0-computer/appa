@@ -1,6 +1,7 @@
 use std::{path::PathBuf, rc::Rc};
 
 use anyhow::Result;
+use appa::hash_manifest;
 use chrono::Utc;
 use tokio::io::AsyncWriteExt;
 use wnfs::{common::BlockStore, public::PublicDirectory};
@@ -47,6 +48,8 @@ enum Commands {
         #[arg(value_name = "PATH")]
         path: String,
     },
+    /// Print a manifest
+    Manifest,
 }
 
 const LATEST: &str = "LATEST";
@@ -138,6 +141,12 @@ async fn main() -> Result<()> {
             let content_cid = root_dir.read(&as_segments(path), &store).await?;
             let content = store.get_block(&content_cid).await?;
             tokio::io::stdout().write_all(&content).await?;
+        }
+        Commands::Manifest => {
+            let (mut store, root_dir) = ensure_store(&ROOT_DIR).await?;
+            let root = root_dir.store(&mut store).await?;
+            let manifest = hash_manifest::walk_dag(store, root)?;
+            println!("{manifest:#?}");
         }
     }
 

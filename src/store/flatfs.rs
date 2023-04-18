@@ -241,6 +241,31 @@ impl Flatfs {
             .types(typ.build().unwrap())
             .build()
     }
+
+    pub(crate) fn get_block_sync<'a>(&'a self, cid: cid::Cid) -> Result<Vec<u8>> {
+        match self.get(&cid.to_string()) {
+            Ok(Some(res)) => Ok(res),
+            Ok(None) => Err(wnfs::error::FsError::NotFound.into()),
+            Err(err) => Err(err),
+        }
+    }
+
+    pub(crate) fn put_block_sync(
+        &self,
+        bytes: Vec<u8>,
+        codec: libipld::IpldCodec,
+    ) -> Result<cid::Cid> {
+        let hash = cid::multihash::Multihash::wrap(
+            cid::multihash::Code::Blake3_256.into(),
+            blake3::hash(&bytes).as_bytes(),
+        )
+        .expect("invalid multihash");
+        let cid = cid::Cid::new_v1(codec.into(), hash);
+        let key = cid.to_string();
+        self.put(&key, bytes)?;
+
+        Ok(cid)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -373,26 +398,14 @@ impl wnfs::common::BlockStore for Flatfs {
     async fn get_block<'a>(&'a self, cid: &cid::Cid) -> Result<Cow<'a, Vec<u8>>> {
         let cid = *cid;
         let self = self.clone();
-        let res = tokio::task::spawn_blocking(move || self.get(&cid.to_string())).await?;
-        match res {
-            Ok(Some(res)) => Ok(Cow::Owned(res)),
-            Ok(None) => Err(wnfs::error::FsError::NotFound.into()),
-            Err(err) => Err(err),
-        }
+        Ok(Cow::Owned(
+            tokio::task::spawn_blocking(move || self.get_block_sync(cid)).await??,
+        ))
     }
 
     async fn put_block(&mut self, bytes: Vec<u8>, codec: libipld::IpldCodec) -> Result<cid::Cid> {
-        let hash = cid::multihash::Multihash::wrap(
-            cid::multihash::Code::Blake3_256.into(),
-            blake3::hash(&bytes).as_bytes(),
-        )
-        .expect("invalid multihash");
-        let cid = cid::Cid::new_v1(codec.into(), hash);
-        let key = cid.to_string();
         let self = self.clone();
-        tokio::task::spawn_blocking(move || self.put(&key, bytes)).await??;
-
-        Ok(cid)
+        tokio::task::spawn_blocking(move || self.put_block_sync(bytes, codec)).await?
     }
 }
 

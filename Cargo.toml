@@ -14,7 +14,9 @@ chrono = "0.4.24"
 cid = "0.10.1"
 clap = { version = "4.2.2", features = ["derive"] }
 ignore = "0.4.20"
+iroh = "0.4.1"
 libipld = "0.16.0"
+serde = { version = "1", features = ["derive"] }
 tokio = { version = "1.27.0", features = ["full"] }
 wnfs = "0.1.20"
 
