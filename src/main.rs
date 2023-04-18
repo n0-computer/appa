@@ -1,9 +1,8 @@
 use std::sync::Arc;
-use std::{net::SocketAddr, path::PathBuf, rc::Rc, str::FromStr};
+use std::{net::SocketAddr, str::FromStr};
 
 use anyhow::{Context as _, Result};
 use appa::fs::Fs;
-use appa::hash_manifest;
 use appa::{hash_manifest::HashManifest, store::Store};
 use bytes::Bytes;
 use futures::FutureExt;
@@ -138,14 +137,19 @@ async fn main() -> Result<()> {
         }
         Commands::Manifest => {
             let fs = Fs::load(&ROOT_DIR).await?;
-            fs.manifest()?;
+            let manifest = fs.manifest_public()?;
+            println!("public manifest: {manifest:#?}");
+
+            let manifest = fs.manifest_private()?;
+            println!("private manifest: {manifest:#?}");
         }
         Commands::Pull {
             peer,
             addr,
             auth_token,
         } => {
-            let (mut store, root_dir) = ensure_store(&ROOT_DIR).await?;
+            let fs = Fs::load(&ROOT_DIR).await?;
+            let manifest = fs.manifest_public()?;
             // pull hashes from store & put hashes in a vec
             let mut opts = iroh::get::Options {
                 peer_id: Some(peer),
@@ -156,8 +160,6 @@ async fn main() -> Result<()> {
             };
             let token = iroh::protocol::AuthToken::from_str(&auth_token)
                 .context("Wrong format for authentication token")?;
-            let root = root_dir.store(&mut store).await?;
-            let manifest = hash_manifest::walk_dag(&store, root)?;
 
             let buf = postcard::to_stdvec(&manifest)?;
             tokio::select! {
@@ -191,14 +193,13 @@ async fn main() -> Result<()> {
             };
         }
         Commands::Provide { addr, auth_token } => {
-            let (mut store, root_dir) = ensure_store(&ROOT_DIR).await?;
-            let root = root_dir.store(&mut store).await?;
-            let manifest = hash_manifest::walk_dag(&store, root)?;
+            let fs = Fs::load(&ROOT_DIR).await?;
+            let manifest = fs.manifest_public()?;
 
             let db = Database::default();
             let custom_handler = CollectionMirrorHandler {
                 manifest: Arc::new(manifest),
-                store,
+                store: fs.store().clone(),
             };
             let provider = provide(
                 db.clone(),

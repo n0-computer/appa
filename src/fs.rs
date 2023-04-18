@@ -13,7 +13,7 @@ use wnfs::{
     public::PublicDirectory,
 };
 
-use crate::store;
+use crate::{hash_manifest::HashManifest, store};
 
 const LATEST: &str = "LATEST_COMMIT";
 
@@ -310,14 +310,16 @@ impl Fs {
         Ok(())
     }
 
-    pub fn manifest(&self) -> Result<()> {
-        let manifest = crate::hash_manifest::walk_dag(&self.store, self.commit.public)?;
-        println!("public manifest: {manifest:#?}");
+    pub fn manifest_public(&self) -> Result<HashManifest> {
+        crate::hash_manifest::walk_dag(&self.store, self.commit.public)
+    }
 
-        let manifest = crate::hash_manifest::walk_dag(&self.store, self.commit.private_forest)?;
-        println!("private manifest: {manifest:#?}");
+    pub fn manifest_private(&self) -> Result<HashManifest> {
+        crate::hash_manifest::walk_dag(&self.store, self.commit.private_forest)
+    }
 
-        Ok(())
+    pub fn store(&self) -> &store::Store {
+        &self.store
     }
 }
 
