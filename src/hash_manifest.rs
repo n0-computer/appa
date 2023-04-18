@@ -1,7 +1,7 @@
 use anyhow::{anyhow, Result};
 use cid::Cid;
 use libipld::{prelude::References, Ipld, IpldCodec};
-use std::{collections::BTreeSet, io::Cursor};
+use std::{collections::BTreeSet, io::Cursor, iter};
 
 use iroh::Hash;
 use serde::{Deserialize, Serialize};
@@ -20,6 +20,10 @@ impl HashManifest {
         Self {
             hashes: hashes.into_iter().collect(),
         }
+    }
+
+    pub fn without(&self, manifest: &HashManifest) -> impl Iterator<Item = Hash> {
+        self.hashes.filter(|hash| !manifest.hashes.contains(hash))
     }
 }
 
