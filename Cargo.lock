@@ -162,6 +162,7 @@ dependencies = [
  "cid",
  "clap",
  "futures",
+ "hex",
  "ignore",
  "iroh",
  "libipld",
@@ -1468,7 +1469,7 @@ dependencies = [
 [[package]]
 name = "iroh"
 version = "0.4.1"
-source = "git+https://github.com/n0-computer/iroh.git?branch=ramfox/porcelain#cd9edc791ca15c6c2bd8fb83d7a22ed89d671258"
+source = "git+https://github.com/n0-computer/iroh.git?branch=ramfox/porcelain#72de1c0cc8548d2f1b9945c77a7d52d175869f2a"
 dependencies = [
  "anyhow",
  "bao-tree",

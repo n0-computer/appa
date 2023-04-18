@@ -1,16 +1,18 @@
-use std::{net::SocketAddr, path::PathBuf, rc::Rc, str::FromStr};
-
-use anyhow::{Context, Result};
+use anyhow::Context;
+use anyhow::Result;
 use appa::hash_manifest;
+use appa::{hash_manifest::HashManifest, store::Store};
 use bytes::Bytes;
 use chrono::Utc;
 use futures::FutureExt;
 use iroh::{
     porcelain::provide,
     protocol::GetRequest,
-    provider::{CustomHandler, Database},
+    provider::{create_collection, CustomHandler, Database},
     PeerId,
 };
+use std::sync::Arc;
+use std::{net::SocketAddr, path::PathBuf, rc::Rc, str::FromStr};
 use tokio::io::AsyncWriteExt;
 use wnfs::{common::BlockStore, public::PublicDirectory};
 
@@ -172,7 +174,7 @@ async fn main() -> Result<()> {
         Commands::Manifest => {
             let (mut store, root_dir) = ensure_store(&ROOT_DIR).await?;
             let root = root_dir.store(&mut store).await?;
-            let manifest = hash_manifest::walk_dag(store, root)?;
+            let manifest = hash_manifest::walk_dag(&store, root)?;
             println!("{manifest:#?}");
         }
         Commands::Pull {
@@ -192,7 +194,7 @@ async fn main() -> Result<()> {
             let token = iroh::protocol::AuthToken::from_str(&auth_token)
                 .context("Wrong format for authentication token")?;
             let root = root_dir.store(&mut store).await?;
-            let manifest = hash_manifest::walk_dag(store, root)?;
+            let manifest = hash_manifest::walk_dag(&store, root)?;
 
             let buf = postcard::to_stdvec(&manifest)?;
             tokio::select! {
@@ -226,9 +228,15 @@ async fn main() -> Result<()> {
             };
         }
         Commands::Provide { addr, auth_token } => {
-            let (mut _store, _root_dir) = ensure_store(&ROOT_DIR).await?;
+            let (mut store, root_dir) = ensure_store(&ROOT_DIR).await?;
+            let root = root_dir.store(&mut store).await?;
+            let manifest = hash_manifest::walk_dag(&store, root)?;
+
             let db = Database::default();
-            let custom_handler = CollectionMirrorHandler;
+            let custom_handler = CollectionMirrorHandler {
+                manifest: Arc::new(manifest),
+                store,
+            };
             let provider = provide(
                 db.clone(),
                 addr,
@@ -258,25 +266,30 @@ async fn main() -> Result<()> {
 }
 
 #[derive(Clone, Debug)]
-struct CollectionMirrorHandler;
+struct CollectionMirrorHandler {
+    manifest: Arc<HashManifest>,
+    store: Store,
+}
 
 impl CustomHandler for CollectionMirrorHandler {
     fn handle(
         &self,
-        _data: Bytes,
+        data: Bytes,
         database: &Database,
     ) -> futures::future::BoxFuture<'static, anyhow::Result<GetRequest>> {
-        let _database = database.clone();
+        let database = database.clone();
+        let sulf = self.clone();
         async move {
-            // let readme = Path::new(env!("CARGO_MANIFEST_DIR")).join("CHANGELOG.md");
-            // let sources = vec![DataSource::File(readme)];
-            // let (new_db, hash) = create_collection(sources).await?;
-            // let new_db = new_db.to_inner();
-            // database.union_with(new_db);
-            // let request = GetRequest::all(hash);
-            // println!("{:?}", request);
-            // Ok(request)
-            todo!();
+            let requestor_manifest: HashManifest = postcard::from_bytes(&data)?;
+            let diff = sulf.manifest.without(&requestor_manifest);
+            let sources = diff.to_sources(&sulf.store)?;
+
+            let (new_db, hash) = create_collection(sources).await?;
+            let new_db = new_db.to_inner();
+            database.union_with(new_db);
+            let request = GetRequest::all(hash);
+            println!("{:?}", request);
+            Ok(request)
         }
         .boxed()
     }

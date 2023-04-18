@@ -3,14 +3,14 @@ use cid::Cid;
 use libipld::{prelude::References, Ipld, IpldCodec};
 use std::{collections::BTreeSet, io::Cursor};
 
-use iroh::Hash;
+use iroh::{provider::DataSource, Hash};
 use serde::{Deserialize, Serialize};
 
 use crate::store::Store;
 
 const BLAKE3_MC: u64 = 0x1e;
 
-#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HashManifest {
     hashes: Vec<Hash>,
 }
@@ -30,9 +30,20 @@ impl HashManifest {
                 .cloned(),
         )
     }
+
+    pub fn to_sources(&self, store: &Store) -> Result<Vec<DataSource>> {
+        let mut sources = Vec::new();
+
+        for hash in self.hashes.iter() {
+            let path = store.get_path(&Store::key_for_hash(hash.as_ref()))?;
+            sources.push(DataSource::File(path));
+        }
+
+        Ok(sources)
+    }
 }
 
-pub fn walk_dag(store: Store, root: Cid) -> Result<HashManifest> {
+pub fn walk_dag(store: &Store, root: Cid) -> Result<HashManifest> {
     let mut visited: BTreeSet<Cid> = BTreeSet::new();
     let mut frontier = vec![root];
     while let Some(cid) = frontier.pop() {
