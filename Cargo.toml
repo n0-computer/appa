@@ -34,7 +34,7 @@ libc = { version = "0.2.141", optional = true }
 tempfile = "3.5.0"
 
 [patch.crates-io]
-wnfs = { path = "../rs-wnfs/wnfs" }
+wnfs = { git = "https://github.com/frando/rs-wnfs", branch = "fuse" }
 
 [features]
 default = ["fuse"]
