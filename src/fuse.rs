@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::ffi::OsStr;
 use std::future::Future;
+use std::os::unix::prelude::MetadataExt;
 use std::path::Path;
 use std::time::{Duration, UNIX_EPOCH};
 
@@ -16,36 +17,24 @@ use wnfs::public::PublicNode;
 use crate::fs::{Fs, Node, NodeKind};
 
 const TTL: Duration = Duration::from_secs(1); // 1 second
-// const ROOT_INO: u64 = 1;
 const BLOCK_SIZE: usize = 512;
-
-const ROOT_ATTR: FileAttr = FileAttr {
-    ino: 1,
-    size: 0,
-    blocks: 0,
-    nlink: 2,
-    perm: 0o555,
-    uid: 1000,
-    gid: 1000,
-    rdev: 0,
-    flags: 0,
-    blksize: BLOCK_SIZE as u32,
-    kind: FileType::Directory,
-    atime: UNIX_EPOCH,
-    mtime: UNIX_EPOCH,
-    ctime: UNIX_EPOCH,
-    crtime: UNIX_EPOCH,
-};
 
 /// Mount a filesystem
 ///
 /// Blocks forever until Ctrl-C.
-/// TODO: use spawn_mount once wnfs is Send.
+/// TODO: use fuser::spawn_mount once wnfs is Send.
 pub fn mount(fs: Fs, mountpoint: impl AsRef<Path>) -> anyhow::Result<()> {
-    let fs = FuseFs::new(fs);
-    let mountpoint = mountpoint.as_ref().to_owned();
+    let mountpoint = mountpoint.as_ref();
+    let mountpoint_meta = std::fs::metadata(mountpoint)?;
+    let config = FuseConfig {
+        uid: mountpoint_meta.uid(),
+        gid: mountpoint_meta.gid(),
+    };
+    let fs = FuseFs::new(fs, config);
+    let mountpoint = mountpoint.to_owned();
     let options = vec![
-        MountOption::RW,
+        // Change to RW once writing files works
+        MountOption::RO,
         MountOption::FSName("appa-wnfs".to_string()),
         MountOption::AutoUnmount,
         MountOption::AllowRoot,
@@ -110,24 +99,49 @@ impl Inode {
     }
 }
 
+pub struct FuseConfig {
+    uid: u32,
+    gid: u32,
+}
+
 pub struct FuseFs {
-    pub(crate) fs: Fs,
-    pub(crate) inodes: Inodes,
+    fs: Fs,
+    inodes: Inodes,
+    config: FuseConfig,
 }
 
 impl FuseFs {
-    pub fn new(fs: Fs) -> Self {
+    pub fn new(fs: Fs, config: FuseConfig) -> Self {
         let mut inodes = Inodes::default();
         // Init root inodes.
         inodes.push("/".to_string());
         inodes.push("/private".to_string());
         inodes.push("/public".to_string());
-        Self { fs, inodes }
+
+        Self { fs, inodes, config }
     }
 
     fn node_to_attr(&self, ino: u64, node: &Node) -> FileAttr {
+        let uid = self.config.uid;
+        let gid = self.config.gid;
         if matches!(node, Node::Root) {
-            return ROOT_ATTR;
+            return FileAttr {
+                ino: 1,
+                size: 0,
+                blocks: 0,
+                nlink: 2,
+                perm: 0o555,
+                uid,
+                gid,
+                rdev: 0,
+                flags: 0,
+                blksize: BLOCK_SIZE as u32,
+                kind: FileType::Directory,
+                atime: UNIX_EPOCH,
+                mtime: UNIX_EPOCH,
+                ctime: UNIX_EPOCH,
+                crtime: UNIX_EPOCH,
+            };
         }
         let metadata = match node {
             Node::Private(PrivateNode::File(file)) => file.get_metadata(),
@@ -142,7 +156,7 @@ impl FuseFs {
         };
         let perm = match node.kind() {
             NodeKind::Directory => 0o555,
-            NodeKind::File => 0x444,
+            NodeKind::File => 0o444,
         };
         let size = node.size(&self.fs).unwrap_or(0);
         let nlink = match node.kind() {
@@ -164,8 +178,8 @@ impl FuseFs {
             blocks: blocks as u64,
             nlink,
             perm,
-            uid: 1000,
-            gid: 1000,
+            uid,
+            gid,
             rdev: 0,
             flags: 0,
             blksize: BLOCK_SIZE as u32,
@@ -286,16 +300,6 @@ impl Filesystem for FuseFs {
             reply.error(ENOENT);
             return;
         };
-        // let dir = if path.len() == 0 {
-        //     self.fs.private_root()
-        // } else {
-        //     let Ok(Some(PrivateNode::Dir(dir))) = block_on(self.fs.get_node(&path)) else {
-        //           trace!("  ENOENT (dir not found)");
-        //           reply.error(ENOENT);
-        //           return;
-        //     };
-        //     dir
-        // };
 
         let mut entries = vec![
             (ino, FileType::Directory, ".".to_string()),

@@ -97,6 +97,14 @@ enum Commands {
         #[arg(value_name = "TARGET")]
         target: String,
     },
+
+    #[cfg(feature = "fuse")]
+    /// Mount with FUSE
+    Mount {
+        /// Directory to mount at
+        #[arg(value_name = "MOUNTPOINT")]
+        mountpoint: String
+    }
 }
 
 #[tokio::main]
@@ -257,6 +265,12 @@ async fn main() -> Result<()> {
             fs.import(&source, &target).await?;
             fs.commit().await?;
             println!("Imported {source} to {target}");
+        }
+
+        #[cfg(feature = "fuse")]
+        Commands::Mount { mountpoint } => {
+            let fs = Fs::load(&ROOT_DIR).await?;
+            appa::fuse::mount(fs, mountpoint)?;
         }
     }
 

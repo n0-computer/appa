@@ -401,17 +401,24 @@ impl Fs {
         let node = match path {
             PathSegments::Root => Some(Node::Root),
             PathSegments::Private(path) => {
-                let node = self
-                    .private
-                    .get_node(&path, false, &self.private_forest, &self.store)
-                    .await?;
-                let node = node.map(Node::Private);
-                node
+                if path.is_empty() {
+                    Some(Node::Private(PrivateNode::Dir(Rc::clone(&self.private))))
+                } else {
+                    self.private
+                        .get_node(&path, false, &self.private_forest, &self.store)
+                        .await?
+                        .map(Node::Private)
+                }
             }
             PathSegments::Public(path) => {
-                let node = self.public.get_node(&path, &self.store).await?;
-                let node = node.map(|node| Node::Public(node.clone()));
-                node
+                if path.is_empty() {
+                    Some(Node::Public(PublicNode::Dir(Rc::clone(&self.public))))
+                } else {
+                    self.public
+                        .get_node(&path, &self.store)
+                        .await?
+                        .map(|node| Node::Public(node.clone()))
+                }
             }
         };
         Ok(node)
@@ -439,12 +446,19 @@ impl Fs {
                 let cid = file.get_content_cid();
                 let mut file = self
                     .store
-                    .get_as_file(&cid.to_string())?
+                    .get_block_as_file(*cid)?
                     .ok_or_else(|| anyhow::anyhow!("Block not found"))?;
                 tokio::task::spawn_blocking(move || {
+                    let meta = file.metadata()?;
+                    let max_size = (offset + size).min(meta.len() as usize);
+                    if max_size == 0 {
+                        return Ok(vec![]);
+                    }
+                    let mut bytes = vec![0u8; max_size];
                     file.seek(SeekFrom::Start(offset as u64))?;
-                    let mut bytes = vec![0u8; size];
+                    tracing::debug!("public read offset {offset} size {size} {file:?}");
                     file.read_exact(&mut bytes)?;
+                    tracing::debug!("public read offset {offset} size {size} {file:?}");
                     Ok(bytes)
                 })
                 .await?
@@ -463,7 +477,7 @@ pub enum Node {
 #[derive(Debug, Clone, PartialEq)]
 pub enum NodeKind {
     Directory,
-    File
+    File,
 }
 
 impl Node {
@@ -473,7 +487,7 @@ impl Node {
             Node::Private(PrivateNode::Dir(_)) => NodeKind::Directory,
             Node::Private(PrivateNode::File(_)) => NodeKind::File,
             Node::Public(PublicNode::Dir(_)) => NodeKind::Directory,
-            Node::Public(PublicNode::File(_)) => NodeKind::File
+            Node::Public(PublicNode::File(_)) => NodeKind::File,
         }
     }
 
@@ -492,7 +506,7 @@ impl Node {
                 // TODO: Does this need spawn_blocking?
                 let file = fs
                     .store
-                    .get_as_file(&cid.to_string())?
+                    .get_block_as_file(*cid)?
                     .ok_or_else(|| anyhow::anyhow!("Block not found"))?;
                 file.metadata()?.len()
             }
