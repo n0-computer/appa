@@ -1,8 +1,8 @@
 use anyhow::{Context as _, Result};
 use appa::fs::Fs;
-use tokio::io::AsyncWriteExt;
-
 use clap::{Parser, Subcommand};
+use tokio::io::AsyncWriteExt;
+use tracing_subscriber::{prelude::*, EnvFilter};
 
 #[derive(Debug, Parser)]
 #[command(name = "appa")]
@@ -57,6 +57,11 @@ enum Commands {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    tracing_subscriber::registry()
+        .with(tracing_subscriber::fmt::layer().with_writer(std::io::stderr))
+        .with(EnvFilter::from_default_env())
+        .init();
+
     let args = Cli::parse();
 
     const ROOT_DIR: &str = ".appa";

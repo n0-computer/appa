@@ -169,6 +169,8 @@ dependencies = [
  "serde",
  "tempfile",
  "tokio",
+ "tracing",
+ "tracing-subscriber",
  "wnfs",
 ]
 

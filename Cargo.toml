@@ -21,6 +21,9 @@ postcard = { version = "1.0.4", features = ["use-std"] }
 rand = "0.8.5"
 tokio = { version = "1.27.0", features = ["full"] }
 wnfs = "0.1.20"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing = "0.1.37"
+
 
 [dev-dependencies]
 tempfile = "3.5.0"
