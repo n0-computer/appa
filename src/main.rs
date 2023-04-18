@@ -1,8 +1,16 @@
-use std::{path::PathBuf, rc::Rc};
+use std::{net::SocketAddr, path::PathBuf, rc::Rc};
 
 use anyhow::Result;
 use appa::hash_manifest;
+use bytes::Bytes;
 use chrono::Utc;
+use futures::FutureExt;
+use iroh::{
+    porcelain::provide,
+    protocol::GetRequest,
+    provider::{CustomHandler, Database},
+    PeerId,
+};
 use tokio::io::AsyncWriteExt;
 use wnfs::{common::BlockStore, public::PublicDirectory};
 
@@ -50,6 +58,25 @@ enum Commands {
     },
     /// Print a manifest
     Manifest,
+    /// Pull any missing files from the node
+    Pull {
+        #[clap(long, short)]
+        peer: PeerId,
+        /// The authentication token to present to the server.
+        #[clap(long)]
+        auth_token: String,
+        /// Optional address of the provider, defaults to 127.0.0.1:4433.
+        #[clap(long, short)]
+        addr: Option<SocketAddr>,
+    },
+    /// Provide
+    Provide {
+        #[clap(long, short)]
+        addr: Option<SocketAddr>,
+        /// Auth token, defaults to random generated.
+        #[clap(long)]
+        auth_token: Option<String>,
+    },
 }
 
 const LATEST: &str = "LATEST";
@@ -148,7 +175,85 @@ async fn main() -> Result<()> {
             let manifest = hash_manifest::walk_dag(store, root)?;
             println!("{manifest:#?}");
         }
+        Commands::Pull { .. } => {
+            // let mut opts = get::Options {
+            //     peer_id: Some(peer),
+            //     keylog: cli.keylog,
+            //     ..Default::default()
+            // };
+            // if let Some(addr) = addr {
+            //     opts.addr = addr;
+            // }
+            // let token = AuthToken::from_str(&auth_token)
+            //     .context("Wrong format for authentication token")?;
+            // let get = GetInteractive::Hash {
+            //     hash: *hash.as_hash(),
+            //     opts,
+            //     token,
+            //     single,
+            // };
+            // tokio::select! {
+            //     biased;
+            //     res = get_interactive(get, out) => res,
+            //     _ = tokio::signal::ctrl_c() => {
+            //         println!("Ending transfer early...");
+            //         Ok(())
+            //     }
+            // }
+            todo!();
+        }
+        Commands::Provide { addr, auth_token } => {
+            let db = Database::default();
+            let custom_handler = CollectionMirrorHandler;
+            let provider = provide(
+                db.clone(),
+                addr,
+                auth_token,
+                None,
+                false,
+                None,
+                custom_handler,
+            )
+            .await?;
+
+            let provider2 = provider.clone();
+            tokio::select! {
+                biased;
+                _ = tokio::signal::ctrl_c() => {
+                    println!("Shutting down provider...");
+                    provider2.shutdown();
+                }
+                res = provider => {
+                    res?;
+                }
+            }
+        }
     }
 
     Ok(())
+}
+
+#[derive(Clone, Debug)]
+struct CollectionMirrorHandler;
+
+impl CustomHandler for CollectionMirrorHandler {
+    fn handle(
+        &self,
+        _data: Bytes,
+        database: &Database,
+    ) -> futures::future::BoxFuture<'static, anyhow::Result<GetRequest>> {
+        let _database = database.clone();
+        async move {
+            // let readme = Path::new(env!("CARGO_MANIFEST_DIR")).join("CHANGELOG.md");
+            // let sources = vec![DataSource::File(readme)];
+            // let (new_db, hash) = create_collection(sources).await?;
+            // let new_db = new_db.to_inner();
+            // database.union_with(new_db);
+            // let request = GetRequest::all(hash);
+            // println!("{:?}", request);
+            // Ok(request)
+            todo!();
+        }
+        .boxed()
+    }
 }
