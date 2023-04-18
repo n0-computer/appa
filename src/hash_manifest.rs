@@ -32,7 +32,7 @@ impl HashManifest {
     }
 }
 
-pub fn walk_dag(store: Store, root: Cid) -> Result<HashManifest> {
+pub fn walk_dag(store: &Store, root: Cid) -> Result<HashManifest> {
     let mut visited: BTreeSet<Cid> = BTreeSet::new();
     let mut frontier = vec![root];
     while let Some(cid) = frontier.pop() {
