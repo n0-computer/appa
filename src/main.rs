@@ -88,7 +88,7 @@ async fn main() -> Result<()> {
         }
         Commands::Manifest => {
             let fs = Fs::load(&ROOT_DIR).await?;
-            fs.manifest().await?;
+            fs.manifest()?;
         }
     }
 

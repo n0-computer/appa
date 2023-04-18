@@ -273,7 +273,7 @@ impl Fs {
         }
     }
 
-    pub async fn manifest(&self) -> Result<()> {
+    pub fn manifest(&self) -> Result<()> {
         let manifest = crate::hash_manifest::walk_dag(&self.store, self.commit.public)?;
         println!("public manifest: {manifest:#?}");
 
