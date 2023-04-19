@@ -1,16 +1,22 @@
+//! FUSE support for WNFS
+//!
+//! Contains some code from
+//! https://github.com/awslabs/mountpoint-s3/blob/main/mountpoint-s3/src/fs.rs
+//! Licensed under the Apache-2.0 License.
+
 use std::collections::HashMap;
 use std::ffi::OsStr;
 use std::future::Future;
 use std::os::unix::prelude::MetadataExt;
 use std::path::Path;
-use std::time::{Duration, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use fuser::{
     FileAttr, FileType, Filesystem, MountOption, ReplyAttr, ReplyData, ReplyDirectory, ReplyEntry,
     Request,
 };
 use libc::ENOENT;
-use tracing::{debug, trace};
+use tracing::{debug, error, trace};
 use wnfs::private::PrivateNode;
 use wnfs::public::PublicNode;
 
@@ -34,7 +40,7 @@ pub fn mount(fs: Fs, mountpoint: impl AsRef<Path>) -> anyhow::Result<()> {
     let mountpoint = mountpoint.to_owned();
     let options = vec![
         // Change to RW once writing files works
-        MountOption::RO,
+        MountOption::RW,
         MountOption::FSName("appa-wnfs".to_string()),
         MountOption::AutoUnmount,
         MountOption::AllowRoot,
@@ -108,6 +114,7 @@ pub struct FuseFs {
     fs: Fs,
     inodes: Inodes,
     config: FuseConfig,
+    write_handles: HashMap<u64, WriteHandle>,
 }
 
 impl FuseFs {
@@ -118,7 +125,12 @@ impl FuseFs {
         inodes.push("/private".to_string());
         inodes.push("/public".to_string());
 
-        Self { fs, inodes, config }
+        Self {
+            fs,
+            inodes,
+            config,
+            write_handles: Default::default(),
+        }
     }
 
     fn node_to_attr(&self, ino: u64, node: &Node) -> FileAttr {
@@ -334,9 +346,6 @@ impl Filesystem for FuseFs {
         reply.ok();
     }
 
-    // fn open(&mut self, _req: &Request<'_>, _ino: u64, _flags: i32, reply: fuser::ReplyOpen) {
-    // }
-
     fn mkdir(
         &mut self,
         _req: &Request<'_>,
@@ -373,6 +382,88 @@ impl Filesystem for FuseFs {
         }
     }
 
+    fn open(&mut self, _req: &Request<'_>, ino: u64, flags: i32, reply: fuser::ReplyOpen) {
+        let Some(path) = self.inodes.get_path(ino) else {
+            trace!("  ENOENT");
+            reply.error(ENOENT);
+            return;
+        };
+
+        if flags & libc::O_RDWR != 0 {
+            error!("O_RDWR is unsupported");
+            return reply.error(libc::EINVAL);
+        } else if flags & libc::O_WRONLY != 0 {
+            // Opened for writing
+            let write_handle = WriteHandle::new(path.clone());
+            self.write_handles.insert(ino, write_handle);
+        } else {
+            // Opened for reading, nothing to do because reads
+            // are stateless atm.
+        };
+
+        reply.opened(0, 0);
+    }
+
+    fn mknod(
+        &mut self,
+        _req: &Request<'_>,
+        parent: u64,
+        name: &OsStr,
+        mode: u32,
+        _umask: u32,
+        _rdev: u32,
+        reply: ReplyEntry,
+    ) {
+        if mode & libc::S_IFMT != libc::S_IFREG {
+            error!(
+                ?parent,
+                ?name,
+                "invalid mknod type {}; only regular files are supported",
+                mode & libc::S_IFMT
+            );
+            reply.error(libc::EINVAL);
+            return;
+        }
+        let Some(path) = self.inodes.get_path(parent) else {
+            trace!("  ENOENT");
+            reply.error(ENOENT);
+            return;
+        };
+        let path = push_segment(&path, &name.to_string_lossy());
+        match block_on(self.fs.get_node(path.clone())) {
+            Ok(Some(_node)) => {
+                trace!("  EEXISTS {path}");
+                reply.error(libc::EEXIST);
+                return;
+            }
+            _ => {}
+        }
+        let ino = self.inodes.push(path);
+        let attr = FileAttr {
+            ino,
+            size: 0,
+            blocks: 0,
+            nlink: 2,
+            perm: 0o755,
+            uid: self.config.uid,
+            gid: self.config.gid,
+            rdev: 0,
+            flags: 0,
+            blksize: BLOCK_SIZE as u32,
+            kind: FileType::RegularFile,
+            atime: SystemTime::now(),
+            mtime: SystemTime::now(),
+            ctime: SystemTime::now(),
+            crtime: SystemTime::now(),
+        };
+        reply.entry(&TTL, &attr, 0);
+    }
+
+    // TODO: Writes are fully collected in memory at the moment and written on release.
+    // This can be made streaming once wnfs is Send.
+    // Only append-only writes are supported.
+    // Partial writes are not cleared up until the file is released, so will lead to memory
+    // overflows potentially.
     fn write(
         &mut self,
         _req: &Request<'_>,
@@ -385,14 +476,81 @@ impl Filesystem for FuseFs {
         _lock_owner: Option<u64>,
         reply: fuser::ReplyWrite,
     ) {
-        let size = data.len();
-        trace!("write i{ino} offset {offset} size {size}");
-        reply.error(ENOENT);
+        let Some(handle) = self.write_handles.get_mut(&ino) else {
+            trace!("  Abort write: Not opened");
+            reply.error(libc::EBADF);
+            return;
+        };
+        match handle.append(offset as u64, data) {
+            Ok(written) => {
+                trace!("  Write ok: {written}");
+                reply.written(written as u32);
+            }
+            Err(err) => {
+                trace!("  Abort write: {err}");
+                reply.error(libc::EINVAL)
+            }
+        }
+    }
+
+    fn release(
+        &mut self,
+        _req: &Request<'_>,
+        ino: u64,
+        _fh: u64,
+        _flags: i32,
+        _lock_owner: Option<u64>,
+        _flush: bool,
+        reply: fuser::ReplyEmpty,
+    ) {
+        if let Some(handle) = self.write_handles.remove(&ino) {
+            let len = handle.content.len();
+            match block_on(async {
+                self.fs.write(handle.path.clone(), handle.content).await?;
+                self.fs.commit().await?;
+                Ok::<(), anyhow::Error>(())
+            }) {
+                Ok(()) => {
+                    trace!("Wrote file {} (len {})", handle.path, len);
+                    reply.ok();
+                }
+                Err(err) => {
+                    trace!("Failed to write file {}: ({})", handle.path, err);
+                    reply.error(libc::EIO);
+                }
+            }
+        } else {
+            reply.ok();
+        }
     }
 }
 
 fn push_segment(path: &str, name: &str) -> String {
     format!("{}/{}", path, name)
+}
+
+pub struct WriteHandle {
+    path: String,
+    pos: usize,
+    content: Vec<u8>,
+}
+
+impl WriteHandle {
+    pub fn new(path: String) -> Self {
+        Self {
+            path,
+            pos: 0,
+            content: Vec::new(),
+        }
+    }
+    pub fn append(&mut self, offset: u64, data: &[u8]) -> anyhow::Result<usize> {
+        if offset as usize != self.pos {
+            return Err(anyhow::anyhow!("Only append-only writes are supported"));
+        }
+        self.pos = offset as usize + data.len();
+        self.content.extend_from_slice(data);
+        Ok(data.len())
+    }
 }
 
 // TODO: Write tests once wnfs is Send
