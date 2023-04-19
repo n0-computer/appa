@@ -79,6 +79,13 @@ impl Inodes {
         self.get(ino).map(|node| &node.path)
     }
 
+    pub fn get_child_path(&self, parent: u64, child_name: &str) -> Option<String> {
+        let Some(parent_path) = self.get_path(parent) else {
+            return None
+        };
+        Some(push_segment(&parent_path, &child_name))
+    }
+
     pub fn get_by_path(&self, path: &str) -> Option<&Inode> {
         self.by_path.get(path).and_then(|ino| self.inodes.get(ino))
     }
@@ -489,6 +496,50 @@ impl Filesystem for FuseFs {
             Err(err) => {
                 trace!("  Abort write: {err}");
                 reply.error(libc::EINVAL)
+            }
+        }
+    }
+
+    fn rename(
+            &mut self,
+            _req: &Request<'_>,
+            parent: u64,
+            name: &OsStr,
+            newparent: u64,
+            newname: &OsStr,
+            _flags: u32,
+            reply: fuser::ReplyEmpty,
+        ) {
+        let Some(old_path) = self.inodes.get_child_path(parent, &name.to_string_lossy()) else {
+            trace!("  ENOENT (parent does not exist)");
+            reply.error(ENOENT);
+            return;
+        };
+        let Some(new_path) = self.inodes.get_child_path(newparent, &newname.to_string_lossy()) else {
+            trace!("  ENOENT (new parent does not exist)");
+            reply.error(ENOENT);
+            return;
+        };
+        match block_on(self.fs.mv(old_path, new_path)) {
+            Ok(_) => reply.ok(),
+            Err(err) => {
+                trace!("  Error {err}");
+                reply.error(libc::EINVAL);
+            }
+        }
+    }
+
+    fn unlink(&mut self, _req: &Request<'_>, parent: u64, name: &OsStr, reply: fuser::ReplyEmpty) {
+        let Some(path) = self.inodes.get_child_path(parent, &name.to_string_lossy()) else {
+            trace!("  ENOENT (parent does not exist)");
+            reply.error(ENOENT);
+            return;
+        };
+        match block_on(self.fs.rm(path)) {
+            Ok(_) => reply.ok(),
+            Err(err) => {
+                trace!("  Error {err}");
+                reply.error(libc::EINVAL);
             }
         }
     }
