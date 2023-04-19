@@ -167,8 +167,8 @@ impl FuseFs {
             NodeKind::File => FileType::RegularFile,
         };
         let perm = match node.kind() {
-            NodeKind::Directory => 0o555,
-            NodeKind::File => 0o444,
+            NodeKind::Directory => 0o755,
+            NodeKind::File => 0o644,
         };
         let size = node.size(&self.fs).unwrap_or(0);
         let nlink = match node.kind() {
