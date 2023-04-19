@@ -218,12 +218,11 @@ fn block_on<F: Future>(future: F) -> F::Output {
 impl Filesystem for FuseFs {
     fn lookup(&mut self, _req: &Request, parent: u64, name: &OsStr, reply: ReplyEntry) {
         trace!("lookup: i{parent} {name:?}");
-        let Some(path) = self.inodes.get_path(parent) else {
+        let Some(path) = self.inodes.get_child_path(parent, &name.to_string_lossy()) else {
             trace!("  ENOENT");
             reply.error(ENOENT);
             return;
         };
-        let path = push_segment(&path, &name.to_str().unwrap());
         let Inode { ino, .. } = self.inodes.get_or_push(&path);
         match block_on(self.fs.get_node(path)) {
             Ok(Some(node)) => {
@@ -363,12 +362,11 @@ impl Filesystem for FuseFs {
         reply: ReplyEntry,
     ) {
         trace!("mkdir : i{parent} {name:?}");
-        let Some(path) = self.inodes.get_path(parent) else {
+        let Some(path) = self.inodes.get_child_path(parent, &name.to_string_lossy()) else {
             trace!("  ENOENT: parent not found");
             reply.error(ENOENT);
             return;
         };
-        let path = push_segment(path, name.to_str().unwrap());
         match block_on(self.fs.mkdir(path.clone())) {
             Ok(_) => match block_on(self.fs.get_node(path.clone())) {
                 Ok(Some(node)) => {
@@ -431,12 +429,11 @@ impl Filesystem for FuseFs {
             reply.error(libc::EINVAL);
             return;
         }
-        let Some(path) = self.inodes.get_path(parent) else {
+        let Some(path) = self.inodes.get_child_path(parent, &name.to_string_lossy()) else {
             trace!("  ENOENT");
             reply.error(ENOENT);
             return;
         };
-        let path = push_segment(&path, &name.to_string_lossy());
         match block_on(self.fs.get_node(path.clone())) {
             Ok(Some(_node)) => {
                 trace!("  EEXISTS {path}");
@@ -501,15 +498,15 @@ impl Filesystem for FuseFs {
     }
 
     fn rename(
-            &mut self,
-            _req: &Request<'_>,
-            parent: u64,
-            name: &OsStr,
-            newparent: u64,
-            newname: &OsStr,
-            _flags: u32,
-            reply: fuser::ReplyEmpty,
-        ) {
+        &mut self,
+        _req: &Request<'_>,
+        parent: u64,
+        name: &OsStr,
+        newparent: u64,
+        newname: &OsStr,
+        _flags: u32,
+        reply: fuser::ReplyEmpty,
+    ) {
         let Some(old_path) = self.inodes.get_child_path(parent, &name.to_string_lossy()) else {
             trace!("  ENOENT (parent does not exist)");
             reply.error(ENOENT);
