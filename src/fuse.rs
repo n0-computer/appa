@@ -493,6 +493,45 @@ impl Filesystem for FuseFs {
         }
     }
 
+    // TODO: Properly do this
+    fn setattr(
+        &mut self,
+        _req: &Request<'_>,
+        ino: u64,
+        _mode: Option<u32>,
+        _uid: Option<u32>,
+        _gid: Option<u32>,
+        _size: Option<u64>,
+        _atime: Option<fuser::TimeOrNow>,
+        _mtime: Option<fuser::TimeOrNow>,
+        _ctime: Option<SystemTime>,
+        _fh: Option<u64>,
+        _crtime: Option<SystemTime>,
+        _chgtime: Option<SystemTime>,
+        _bkuptime: Option<SystemTime>,
+        _flags: Option<u32>,
+        reply: ReplyAttr,
+    ) {
+        let attr = FileAttr {
+            ino,
+            size: 0,
+            blocks: 0,
+            nlink: 2,
+            perm: 0o755,
+            uid: self.config.uid,
+            gid: self.config.gid,
+            rdev: 0,
+            flags: 0,
+            blksize: BLOCK_SIZE as u32,
+            kind: FileType::RegularFile,
+            atime: SystemTime::now(),
+            mtime: SystemTime::now(),
+            ctime: SystemTime::now(),
+            crtime: SystemTime::now(),
+        };
+        reply.attr(&TTL, &attr)
+    }
+
     fn release(
         &mut self,
         _req: &Request<'_>,
