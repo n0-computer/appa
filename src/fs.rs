@@ -390,7 +390,7 @@ impl Fs {
                     .ok_or_else(|| anyhow::anyhow!("Block not found"))?;
                 tokio::task::spawn_blocking(move || {
                     let meta = file.metadata()?;
-                    let max_size = (offset + size).min(meta.len() as usize);
+                    let max_size = (offset + size).min(meta.len() as usize - offset);
                     if max_size == 0 {
                         return Ok(vec![]);
                     }
