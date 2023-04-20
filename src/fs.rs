@@ -553,7 +553,7 @@ mod tests {
                 let path = format!(
                     "{}/{}",
                     target,
-                    file.path().strip_prefix(&source).unwrap().to_string_lossy()
+                    canonicalize_path(file.path().strip_prefix(&source).unwrap()).unwrap()
                 );
                 let content_wnfs = fs.cat(path).await.unwrap();
                 assert_eq!(content_fs, content_wnfs);
