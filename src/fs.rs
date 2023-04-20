@@ -1,5 +1,5 @@
 use std::{
-    path::{Path, PathBuf, Component},
+    path::{Component, Path, PathBuf},
     rc::Rc,
 };
 
@@ -436,7 +436,6 @@ fn canonicalize_path(path: impl AsRef<Path>) -> anyhow::Result<String> {
         .collect::<anyhow::Result<Vec<_>>>()?;
     Ok(parts.join("/"))
 }
-
 
 #[cfg(test)]
 mod tests {
