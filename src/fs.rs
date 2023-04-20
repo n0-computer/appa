@@ -47,7 +47,7 @@ impl Commit {
     }
 
     pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
-        let res = postcard::from_bytes(&bytes)?;
+        let res = postcard::from_bytes(bytes)?;
         Ok(res)
     }
 }
@@ -222,7 +222,7 @@ impl Fs {
             PathSegments::Public(path) => {
                 let content_cid = self
                     .store
-                    .put_block(content.into(), libipld::IpldCodec::Raw.into())
+                    .put_block(content.into(), libipld::IpldCodec::Raw)
                     .await?;
 
                 self.public
@@ -396,7 +396,7 @@ pub enum PathSegments {
 impl PathSegments {
     pub fn from_path(path: String) -> Result<Self> {
         let mut parts = path
-            .split("/")
+            .split('/')
             .filter(|s| !s.is_empty())
             .map(|s| s.to_string());
 
