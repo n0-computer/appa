@@ -5,7 +5,7 @@ use anyhow::{Context as _, Result};
 use appa::fs::Fs;
 use appa::{hash_manifest::HashManifest, store::Store};
 use bytes::Bytes;
-use futures::FutureExt;
+use futures::{FutureExt};
 use iroh::provider::DataSource;
 use iroh::{
     porcelain::provide,
@@ -86,6 +86,17 @@ enum Commands {
         #[clap(long)]
         auth_token: Option<String>,
     },
+
+    /// Import a file tree
+    Import {
+        /// Source directory (on your machine)
+        #[arg(value_name = "SOURCE")]
+        source: String,
+
+        /// Target path (in WNFS)
+        #[arg(value_name = "TARGET")]
+        target: String
+    }
 }
 
 #[tokio::main]
@@ -239,6 +250,13 @@ async fn main() -> Result<()> {
                     res?;
                 }
             }
+        }
+
+        Commands::Import { source, target } => {
+            let mut fs = Fs::load(&ROOT_DIR).await?;
+            fs.import(&source, &target).await?;
+            fs.commit().await?;
+            println!("Imported {source} to {target}");
         }
     }
 

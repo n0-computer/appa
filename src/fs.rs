@@ -6,6 +6,8 @@ use std::{
 use anyhow::{Context as _, Result};
 use chrono::Utc;
 use cid::Cid;
+use futures::StreamExt;
+use tracing::debug;
 use wnfs::{
     common::{BlockStore, HashOutput},
     namefilter::Namefilter,
@@ -96,24 +98,41 @@ impl Fs {
             .context("loading commit")?
             .ok_or_else(|| anyhow::anyhow!("bad state, missing commit"))?;
         let latest_commit = Commit::from_bytes(&latest_commit_raw)?;
+
         let dir: PublicDirectory = store
             .get_deserializable(&latest_commit.public)
             .await
             .context("public")?;
+
+        debug!("Loaded commit: PublicDirectory at {}", latest_commit.public);
+
         let public_root_dir = Rc::new(dir);
 
         let private_forest: PrivateForest = store
             .get_deserializable(&latest_commit.private_forest)
             .await
             .context("private forest")?;
+
+        debug!(
+            "Loaded commit: PrivateForest   at {}",
+            latest_commit.private_forest
+        );
+
         let private_ref = PrivateRef {
             saturated_name_hash: latest_commit.private_saturated_name_hash,
             temporal_key: latest_commit.private_temporal_key.clone(),
             content_cid: latest_commit.private_content_cid,
         };
+
         let private_node = PrivateNode::load(&private_ref, &private_forest, &store)
             .await
             .context("private")?;
+
+        debug!(
+            "Loaded commit: PrivateNode     at {}",
+            latest_commit.private_content_cid
+        );
+
         let private_forest = Rc::new(private_forest);
 
         // Update to the latest
@@ -131,6 +150,7 @@ impl Fs {
 
     pub async fn commit(&mut self) -> Result<()> {
         let public = self.public.store(&mut self.store).await?;
+        debug!("Saved PublicDirectory  at {public}");
         let private_ref = self
             .private
             .store(
@@ -139,10 +159,14 @@ impl Fs {
                 &mut rand::thread_rng(),
             )
             .await?;
+        debug!("Saved PrivateDirectory at {}", private_ref.content_cid);
+
         let private_forest = self
             .store
             .put_async_serializable(&self.private_forest)
             .await?;
+        debug!("Saved PrivateForest    at {}", private_forest);
+
         self.commit = Commit {
             public,
             private_forest,
@@ -152,6 +176,7 @@ impl Fs {
         };
 
         self.store.put(LATEST, self.commit.to_vec())?;
+        debug!("Saved commit at {LATEST}");
 
         Ok(())
     }
@@ -184,6 +209,10 @@ impl Fs {
     }
 
     pub async fn add(&mut self, dir: String, content: String) -> Result<()> {
+        self.write(dir, content.into_bytes()).await
+    }
+
+    pub async fn write(&mut self, dir: String, content: Vec<u8>) -> Result<()> {
         let path = PathSegments::from_path(dir)?;
 
         match path {
@@ -311,6 +340,27 @@ impl Fs {
         Ok(())
     }
 
+    pub async fn import(&mut self, source: &str, target: &str) -> anyhow::Result<()> {
+        debug!("import {source} to {target}");
+        let mut files = futures::stream::iter(walkdir::WalkDir::new(&source));
+        while let Some(file) = files.next().await {
+            let file = file?;
+            let full_path = file.path();
+            let rel_path = full_path.strip_prefix(&source)?;
+            let target_path = format!("{}/{}", target, rel_path.to_string_lossy());
+            if file.file_type().is_dir() {
+                self.mkdir(target_path.clone()).await?;
+                debug!("import: created directory {target_path}");
+            } else if file.file_type().is_file() {
+                let content = tokio::fs::read(full_path).await?;
+                let size = content.len();
+                self.write(target_path.clone(), content).await?;
+                debug!("import: wrote file {target_path} (size {size})");
+            }
+        }
+        Ok(())
+    }
+
     pub fn manifest(&self) -> Result<HashManifest> {
         let mut public = self.manifest_public()?;
         let private = self.manifest_private()?;
@@ -426,6 +476,59 @@ mod tests {
         assert_eq!(text, b"hello world");
 
         fs.commit().await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_reopen() -> Result<()> {
+        tracing_subscriber::fmt::init();
+        let dir = tempfile::tempdir().unwrap();
+        let mut fs = Fs::init(&dir).await?;
+        fs.add("/private/hello.txt".into(), "hello world".into())
+            .await?;
+        fs.commit().await?;
+        drop(fs);
+        let fs = Fs::load(&dir).await?;
+        let text = fs.cat("/private/hello.txt".into()).await?;
+        assert_eq!(text, b"hello world");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_import() -> Result<()> {
+        let dir = tempfile::tempdir().unwrap();
+        let mut fs = Fs::init(&dir).await?;
+        let source = format!("{}/{}", env!("CARGO_MANIFEST_DIR"), "src");
+        let target = "/private/test";
+        fs.import(&source, target).await?;
+        fs.commit().await?;
+        drop(fs);
+        let fs = Fs::load(&dir).await?;
+        let mut files = futures::stream::iter(walkdir::WalkDir::new(&source));
+        // check top level dir manually as a smoke test
+        let list_wnfs = fs
+            .ls(target.to_string())
+            .await?
+            .iter()
+            .map(|(name, _meta)| name.to_string())
+            .collect::<Vec<String>>()
+            .sort();
+        let list_fs = std::fs::read_dir(&source)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into())
+            .collect::<Vec<String>>()
+            .sort();
+        assert_eq!(list_wnfs, list_fs);
+        // check all files
+        while let Some(file) = files.next().await {
+            let file = file.unwrap();
+            if file.file_type().is_file() {
+                let content_fs = tokio::fs::read(file.path()).await.unwrap();
+                let path = format!("{}/{}", target, file.path().strip_prefix(&source).unwrap().to_string_lossy());
+                let content_wnfs = fs.cat(path).await.unwrap();
+                assert_eq!(content_fs, content_wnfs);
+            }
+        }
         Ok(())
     }
 }
