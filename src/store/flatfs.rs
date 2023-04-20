@@ -242,7 +242,7 @@ impl Flatfs {
             .build()
     }
 
-    pub(crate) fn get_block_sync<'a>(&'a self, cid: cid::Cid) -> Result<Vec<u8>> {
+    pub(crate) fn get_block_sync(&self, cid: cid::Cid) -> Result<Vec<u8>> {
         match self.get(&Self::key_for_cid(cid)) {
             Ok(Some(res)) => Ok(res),
             Ok(None) => Err(wnfs::error::FsError::NotFound.into()),

@@ -1,5 +1,5 @@
 use std::{
-    path::{Path, PathBuf},
+    path::{Component, Path, PathBuf},
     rc::Rc,
 };
 
@@ -47,7 +47,7 @@ impl Commit {
     }
 
     pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
-        let res = postcard::from_bytes(&bytes)?;
+        let res = postcard::from_bytes(bytes)?;
         Ok(res)
     }
 }
@@ -222,7 +222,7 @@ impl Fs {
             PathSegments::Public(path) => {
                 let content_cid = self
                     .store
-                    .put_block(content.into(), libipld::IpldCodec::Raw.into())
+                    .put_block(content, libipld::IpldCodec::Raw)
                     .await?;
 
                 self.public
@@ -235,7 +235,7 @@ impl Fs {
                         &path,
                         true,
                         Utc::now(),
-                        content.into(),
+                        content,
                         &mut self.private_forest,
                         &mut self.store,
                         &mut rand::thread_rng(),
@@ -340,14 +340,14 @@ impl Fs {
         Ok(())
     }
 
-    pub async fn import(&mut self, source: &str, target: &str) -> anyhow::Result<()> {
-        debug!("import {source} to {target}");
+    pub async fn import(&mut self, source: impl AsRef<Path>, target: &str) -> anyhow::Result<()> {
+        debug!("import {:?} to {target}", source.as_ref());
         let mut files = futures::stream::iter(walkdir::WalkDir::new(&source));
         while let Some(file) = files.next().await {
             let file = file?;
             let full_path = file.path();
-            let rel_path = full_path.strip_prefix(&source)?;
-            let target_path = format!("{}/{}", target, rel_path.to_string_lossy());
+            let rel_path = canonicalize_path(full_path.strip_prefix(&source)?)?;
+            let target_path = format!("{}/{}", target, rel_path);
             if file.file_type().is_dir() {
                 self.mkdir(target_path.clone()).await?;
                 debug!("import: created directory {target_path}");
@@ -396,7 +396,7 @@ pub enum PathSegments {
 impl PathSegments {
     pub fn from_path(path: String) -> Result<Self> {
         let mut parts = path
-            .split("/")
+            .split('/')
             .filter(|s| !s.is_empty())
             .map(|s| s.to_string());
 
@@ -409,6 +409,32 @@ impl PathSegments {
             None => Ok(PathSegments::Root),
         }
     }
+}
+
+/// converts a canonicalized relative path to a string, returning an error if
+/// the path is not valid unicode
+///
+/// this will also fail if the path is non canonical, i.e. contains `..` or `.`,
+/// or if the path components contain any windows or unix path separators
+fn canonicalize_path(path: impl AsRef<Path>) -> anyhow::Result<String> {
+    let parts = path
+        .as_ref()
+        .components()
+        .map(|c| {
+            let c = if let Component::Normal(x) = c {
+                x.to_str().context("invalid character in path")?
+            } else {
+                anyhow::bail!("invalid path component {:?}", c)
+            };
+            anyhow::ensure!(
+                !c.contains('/') && !c.contains('\\'),
+                "invalid path component {:?}",
+                c
+            );
+            Ok(c)
+        })
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    Ok(parts.join("/"))
 }
 
 #[cfg(test)]
@@ -506,25 +532,29 @@ mod tests {
         let fs = Fs::load(&dir).await?;
         let mut files = futures::stream::iter(walkdir::WalkDir::new(&source));
         // check top level dir manually as a smoke test
-        let list_wnfs = fs
+        let mut list_wnfs: Vec<String> = fs
             .ls(target.to_string())
             .await?
             .iter()
             .map(|(name, _meta)| name.to_string())
-            .collect::<Vec<String>>()
-            .sort();
-        let list_fs = std::fs::read_dir(&source)
+            .collect();
+        list_wnfs.sort();
+        let mut list_fs: Vec<String> = std::fs::read_dir(&source)
             .unwrap()
             .map(|e| e.unwrap().file_name().to_string_lossy().into())
-            .collect::<Vec<String>>()
-            .sort();
+            .collect();
+        list_fs.sort();
         assert_eq!(list_wnfs, list_fs);
         // check all files
         while let Some(file) = files.next().await {
             let file = file.unwrap();
             if file.file_type().is_file() {
                 let content_fs = tokio::fs::read(file.path()).await.unwrap();
-                let path = format!("{}/{}", target, file.path().strip_prefix(&source).unwrap().to_string_lossy());
+                let path = format!(
+                    "{}/{}",
+                    target,
+                    canonicalize_path(file.path().strip_prefix(&source).unwrap()).unwrap()
+                );
                 let content_wnfs = fs.cat(path).await.unwrap();
                 assert_eq!(content_fs, content_wnfs);
             }
