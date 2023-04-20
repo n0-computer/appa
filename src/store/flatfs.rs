@@ -10,6 +10,11 @@ use std::{
 };
 
 use anyhow::{anyhow, Context, Result};
+use rand::Rng;
+use tokio::{
+    io::{AsyncBufReadExt, AsyncRead, AsyncWriteExt},
+    task::spawn_blocking,
+};
 
 use super::shard::{self, Shard};
 
@@ -33,6 +38,10 @@ const RETRY_DELAY: u64 = 200;
 /// The maximum number of retries that will be attempted.
 const RETRY_ATTEMPTS: usize = 6;
 
+/// The buffer size for put_block_streaming
+/// TODO: Find out what a good size is
+const STREAMING_PUT_BUF_CAP: usize = 1024 * 512;
+
 impl Flatfs {
     /// Creates or opens an existing store at the provided path as the root.
     pub fn new<P: AsRef<Path>>(path: P) -> Result<Self> {
@@ -48,8 +57,7 @@ impl Flatfs {
         }
     }
 
-    /// Stores the given value under the given key.
-    pub fn put<T: AsRef<[u8]>>(&self, key: &str, value: T) -> Result<()> {
+    fn ensure_path(&self, key: &str) -> Result<PathBuf> {
         ensure_valid_key(key)?;
         let filepath = self.as_path(key);
         let parent_dir = filepath.parent().unwrap();
@@ -64,6 +72,12 @@ impl Flatfs {
                 }
             }
         }
+        Ok(filepath)
+    }
+
+    /// Stores the given value under the given key.
+    pub fn put<T: AsRef<[u8]>>(&self, key: &str, value: T) -> Result<()> {
+        let filepath = self.ensure_path(key)?;
 
         // Write to temp location
         let temp_filepath = filepath.with_extension(".temp");
@@ -263,6 +277,85 @@ impl Flatfs {
         let cid = cid::Cid::new_v1(codec.into(), hash);
         let key = Self::key_for_cid(cid);
         self.put(&key, bytes)?;
+
+        Ok(cid)
+    }
+
+    fn create_tempfile(&self) -> Result<(PathBuf, fs::File)> {
+        let temp_dir = &self.path.join(".temp");
+        if !temp_dir.exists() {
+            if let Err(err) = retry(|| fs::create_dir(temp_dir)) {
+                // Directory got already created, that's fine.
+                if err.kind() != io::ErrorKind::AlreadyExists {
+                    return Err(err).with_context(|| format!("Failed to create {:?}", temp_dir));
+                }
+            }
+        }
+        let rand_string: String = rand::thread_rng()
+            .sample_iter(&rand::distributions::Alphanumeric)
+            .take(20)
+            .map(char::from)
+            .collect();
+        let tempfile_path = temp_dir.join(rand_string);
+        let tempfile = std::fs::File::create(&tempfile_path)?;
+        Ok((tempfile_path, tempfile))
+    }
+
+    /// Store the contents of the given async reader under its hash
+    pub async fn put_block_streaming(
+        &mut self,
+        reader: impl AsyncRead + Unpin + Send + 'static,
+        codec: libipld::IpldCodec,
+    ) -> Result<cid::Cid> {
+        let this = self.clone();
+        // Create a tempfile
+        let (tempfile_path, tempfile) = spawn_blocking(move || this.create_tempfile()).await??;
+
+        // Write to the tempfile and update hasher for each chunk
+        let mut tempfile = tokio::fs::File::from_std(tempfile);
+        let mut hasher = blake3::Hasher::new();
+        let mut reader = tokio::io::BufReader::with_capacity(STREAMING_PUT_BUF_CAP, reader);
+        let mut total_len = 0;
+        loop {
+            let len = {
+                let bytes = reader.fill_buf().await?;
+                if bytes.is_empty() {
+                    break;
+                }
+                hasher.update(&bytes);
+                tempfile.write_all(&bytes).await?;
+                bytes.len()
+            };
+            reader.consume(len);
+            total_len += len;
+        }
+
+        // Rename tempfile to final path based on hash
+        let hash = cid::multihash::Multihash::wrap(
+            cid::multihash::Code::Blake3_256.into(),
+            hasher.finalize().as_bytes(),
+        )
+        .expect("invalid multihash");
+        let cid = cid::Cid::new_v1(codec.into(), hash);
+        let key = Self::key_for_cid(cid);
+        let this = self.clone();
+        let cid = spawn_blocking(move || {
+            let filepath = this.ensure_path(&key)?;
+            if let Err(err) = retry(|| fs::rename(&tempfile_path, &filepath))
+                .with_context(|| format!("Failed to rename: {tempfile_path:?} -> {filepath:?}"))
+            {
+                retry(|| fs::remove_file(&tempfile_path))
+                    .with_context(|| format!("{}", err))
+                    .with_context(|| format!("Failed to delete tempfile: {tempfile_path:?}"))?;
+                Err(err)
+            } else {
+                Ok(cid)
+            }
+        })
+        .await??;
+
+        self.disk_usage
+            .fetch_add(total_len as u64, Ordering::SeqCst);
 
         Ok(cid)
     }

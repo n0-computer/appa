@@ -1,12 +1,15 @@
 use std::{
+    io::Cursor,
     path::{Component, Path, PathBuf},
     rc::Rc,
 };
 
 use anyhow::{Context as _, Result};
+use async_compat::CompatExt;
 use chrono::Utc;
 use cid::Cid;
 use futures::StreamExt;
+use tokio::io::AsyncRead;
 use tracing::debug;
 use wnfs::{
     common::{BlockStore, HashOutput},
@@ -209,10 +212,10 @@ impl Fs {
     }
 
     pub async fn add(&mut self, dir: String, content: String) -> Result<()> {
-        self.write(dir, content.into_bytes()).await
+        self.write(dir, Cursor::new(content.into_bytes())).await
     }
 
-    pub async fn write(&mut self, dir: String, content: Vec<u8>) -> Result<()> {
+    pub async fn write(&mut self, dir: String, content: impl AsyncRead + Send + Unpin + 'static) -> Result<()> {
         let path = PathSegments::from_path(dir)?;
 
         match path {
@@ -222,7 +225,7 @@ impl Fs {
             PathSegments::Public(path) => {
                 let content_cid = self
                     .store
-                    .put_block(content, libipld::IpldCodec::Raw)
+                    .put_block_streaming(content, libipld::IpldCodec::Raw.into())
                     .await?;
 
                 self.public
@@ -230,17 +233,25 @@ impl Fs {
                     .await?;
             }
             PathSegments::Private(path) => {
-                self.private
-                    .write(
+                let file = self
+                    .private
+                    .open_file_mut(
                         &path,
                         true,
                         Utc::now(),
-                        content,
                         &mut self.private_forest,
                         &mut self.store,
                         &mut rand::thread_rng(),
                     )
                     .await?;
+                file.set_content(
+                    Utc::now(),
+                    content.compat(),
+                    &mut self.private_forest,
+                    &mut self.store,
+                    &mut rand::thread_rng(),
+                )
+                .await?;
             }
         }
 
@@ -352,8 +363,8 @@ impl Fs {
                 self.mkdir(target_path.clone()).await?;
                 debug!("import: created directory {target_path}");
             } else if file.file_type().is_file() {
-                let content = tokio::fs::read(full_path).await?;
-                let size = content.len();
+                let content = tokio::fs::File::open(full_path).await?;
+                let size = content.metadata().await?.len();
                 self.write(target_path.clone(), content).await?;
                 debug!("import: wrote file {target_path} (size {size})");
             }
@@ -507,7 +518,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_reopen() -> Result<()> {
-        tracing_subscriber::fmt::init();
         let dir = tempfile::tempdir().unwrap();
         let mut fs = Fs::init(&dir).await?;
         fs.add("/private/hello.txt".into(), "hello world".into())
@@ -526,6 +536,8 @@ mod tests {
         let mut fs = Fs::init(&dir).await?;
         let source = format!("{}/{}", env!("CARGO_MANIFEST_DIR"), "src");
         let target = "/private/test";
+        fs.import(&source, target).await?;
+        let target = "/public/test";
         fs.import(&source, target).await?;
         fs.commit().await?;
         drop(fs);
@@ -551,8 +563,13 @@ mod tests {
             if file.file_type().is_file() {
                 let content_fs = tokio::fs::read(file.path()).await.unwrap();
                 let path = format!(
-                    "{}/{}",
-                    target,
+                    "public/test/{}",
+                    canonicalize_path(file.path().strip_prefix(&source).unwrap()).unwrap()
+                );
+                let content_wnfs = fs.cat(path).await.unwrap();
+                assert_eq!(content_fs, content_wnfs);
+                let path = format!(
+                    "private/test/{}",
                     canonicalize_path(file.path().strip_prefix(&source).unwrap()).unwrap()
                 );
                 let content_wnfs = fs.cat(path).await.unwrap();
