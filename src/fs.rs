@@ -524,7 +524,11 @@ mod tests {
             let file = file.unwrap();
             if file.file_type().is_file() {
                 let content_fs = tokio::fs::read(file.path()).await.unwrap();
-                let path = format!("{}/{}", target, file.path().strip_prefix(&source).unwrap().to_string_lossy());
+                let path = format!(
+                    "{}/{}",
+                    target,
+                    file.path().strip_prefix(&source).unwrap().to_string_lossy()
+                );
                 let content_wnfs = fs.cat(path).await.unwrap();
                 assert_eq!(content_fs, content_wnfs);
             }

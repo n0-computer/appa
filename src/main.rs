@@ -5,7 +5,7 @@ use anyhow::{Context as _, Result};
 use appa::fs::Fs;
 use appa::{hash_manifest::HashManifest, store::Store};
 use bytes::Bytes;
-use futures::{FutureExt};
+use futures::FutureExt;
 use iroh::provider::DataSource;
 use iroh::{
     porcelain::provide,
@@ -95,8 +95,8 @@ enum Commands {
 
         /// Target path (in WNFS)
         #[arg(value_name = "TARGET")]
-        target: String
-    }
+        target: String,
+    },
 }
 
 #[tokio::main]
