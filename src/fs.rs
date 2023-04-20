@@ -506,18 +506,18 @@ mod tests {
         let fs = Fs::load(&dir).await?;
         let mut files = futures::stream::iter(walkdir::WalkDir::new(&source));
         // check top level dir manually as a smoke test
-        let list_wnfs = fs
+        let mut list_wnfs: Vec<String> = fs
             .ls(target.to_string())
             .await?
             .iter()
             .map(|(name, _meta)| name.to_string())
-            .collect::<Vec<String>>()
-            .sort();
-        let list_fs = std::fs::read_dir(&source)
+            .collect();
+        list_wnfs.sort();
+        let mut list_fs: Vec<String> = std::fs::read_dir(&source)
             .unwrap()
             .map(|e| e.unwrap().file_name().to_string_lossy().into())
-            .collect::<Vec<String>>()
-            .sort();
+            .collect();
+        list_fs.sort();
         assert_eq!(list_wnfs, list_fs);
         // check all files
         while let Some(file) = files.next().await {
