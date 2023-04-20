@@ -308,9 +308,31 @@ impl Flatfs {
         codec: libipld::IpldCodec,
     ) -> Result<cid::Cid> {
         let this = self.clone();
-        // Create a tempfile
         let (tempfile_path, tempfile) = spawn_blocking(move || this.create_tempfile()).await??;
+        match self
+            .put_block_streaming_inner(tempfile, tempfile_path.clone(), reader, codec)
+            .await
+        {
+            Ok(cid) => Ok(cid),
+            Err(err) => {
+                tokio::task::spawn_blocking(move || {
+                    retry(|| fs::remove_file(&tempfile_path))
+                        .with_context(|| format!("{}", err))
+                        .with_context(|| format!("Failed to delete tempfile: {tempfile_path:?}"))?;
+                    Err(err)
+                })
+                .await?
+            }
+        }
+    }
 
+    async fn put_block_streaming_inner(
+        &mut self,
+        tempfile: std::fs::File,
+        tempfile_path: PathBuf,
+        reader: impl AsyncRead + Unpin + Send + 'static,
+        codec: libipld::IpldCodec,
+    ) -> Result<cid::Cid> {
         // Write to the tempfile and update hasher for each chunk
         let mut tempfile = tokio::fs::File::from_std(tempfile);
         let mut hasher = blake3::Hasher::new();
@@ -339,18 +361,10 @@ impl Flatfs {
         let cid = cid::Cid::new_v1(codec.into(), hash);
         let key = Self::key_for_cid(cid);
         let this = self.clone();
-        let cid = spawn_blocking(move || {
+        spawn_blocking(move || {
             let filepath = this.ensure_path(&key)?;
-            if let Err(err) = retry(|| fs::rename(&tempfile_path, &filepath))
+            retry(|| fs::rename(&tempfile_path, &filepath))
                 .with_context(|| format!("Failed to rename: {tempfile_path:?} -> {filepath:?}"))
-            {
-                retry(|| fs::remove_file(&tempfile_path))
-                    .with_context(|| format!("{}", err))
-                    .with_context(|| format!("Failed to delete tempfile: {tempfile_path:?}"))?;
-                Err(err)
-            } else {
-                Ok(cid)
-            }
         })
         .await??;
 
