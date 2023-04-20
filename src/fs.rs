@@ -1,5 +1,5 @@
 use std::{
-    path::{Path, PathBuf},
+    path::{Path, PathBuf, Component},
     rc::Rc,
 };
 
@@ -340,14 +340,14 @@ impl Fs {
         Ok(())
     }
 
-    pub async fn import(&mut self, source: &str, target: &str) -> anyhow::Result<()> {
-        debug!("import {source} to {target}");
-        let mut files = futures::stream::iter(walkdir::WalkDir::new(source));
+    pub async fn import(&mut self, source: impl AsRef<Path>, target: &str) -> anyhow::Result<()> {
+        debug!("import {:?} to {target}", source.as_ref());
+        let mut files = futures::stream::iter(walkdir::WalkDir::new(&source));
         while let Some(file) = files.next().await {
             let file = file?;
             let full_path = file.path();
-            let rel_path = full_path.strip_prefix(source)?;
-            let target_path = format!("{}/{}", target, rel_path.to_string_lossy());
+            let rel_path = canonicalize_path(full_path.strip_prefix(&source)?)?;
+            let target_path = format!("{}/{}", target, rel_path);
             if file.file_type().is_dir() {
                 self.mkdir(target_path.clone()).await?;
                 debug!("import: created directory {target_path}");
@@ -410,6 +410,33 @@ impl PathSegments {
         }
     }
 }
+
+/// converts a canonicalized relative path to a string, returning an error if
+/// the path is not valid unicode
+///
+/// this will also fail if the path is non canonical, i.e. contains `..` or `.`,
+/// or if the path components contain any windows or unix path separators
+fn canonicalize_path(path: impl AsRef<Path>) -> anyhow::Result<String> {
+    let parts = path
+        .as_ref()
+        .components()
+        .map(|c| {
+            let c = if let Component::Normal(x) = c {
+                x.to_str().context("invalid character in path")?
+            } else {
+                anyhow::bail!("invalid path component {:?}", c)
+            };
+            anyhow::ensure!(
+                !c.contains('/') && !c.contains('\\'),
+                "invalid path component {:?}",
+                c
+            );
+            Ok(c)
+        })
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    Ok(parts.join("/"))
+}
+
 
 #[cfg(test)]
 mod tests {
