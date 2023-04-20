@@ -222,7 +222,7 @@ impl Fs {
             PathSegments::Public(path) => {
                 let content_cid = self
                     .store
-                    .put_block(content.into(), libipld::IpldCodec::Raw)
+                    .put_block(content, libipld::IpldCodec::Raw)
                     .await?;
 
                 self.public
@@ -235,7 +235,7 @@ impl Fs {
                         &path,
                         true,
                         Utc::now(),
-                        content.into(),
+                        content,
                         &mut self.private_forest,
                         &mut self.store,
                         &mut rand::thread_rng(),
@@ -342,11 +342,11 @@ impl Fs {
 
     pub async fn import(&mut self, source: &str, target: &str) -> anyhow::Result<()> {
         debug!("import {source} to {target}");
-        let mut files = futures::stream::iter(walkdir::WalkDir::new(&source));
+        let mut files = futures::stream::iter(walkdir::WalkDir::new(source));
         while let Some(file) = files.next().await {
             let file = file?;
             let full_path = file.path();
-            let rel_path = full_path.strip_prefix(&source)?;
+            let rel_path = full_path.strip_prefix(source)?;
             let target_path = format!("{}/{}", target, rel_path.to_string_lossy());
             if file.file_type().is_dir() {
                 self.mkdir(target_path.clone()).await?;
