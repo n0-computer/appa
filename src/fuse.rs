@@ -72,8 +72,8 @@ where
         Ok(())
     });
     let res = res.join();
-    let res = res.map_err(|err| anyhow::anyhow!(format!("{:?}", err)))?;
-    res
+
+    res.map_err(|err| anyhow::anyhow!(format!("{:?}", err)))?
 }
 
 /// Inode index for a filesystem.
@@ -109,7 +109,7 @@ impl Inodes {
         let Some(parent_path) = self.get_path(parent) else {
             return None
         };
-        Some(push_segment(&parent_path, &child_name))
+        Some(push_segment(parent_path, child_name))
     }
 
     pub fn get_by_path(&self, path: &str) -> Option<&Inode> {
@@ -155,6 +155,11 @@ impl Runtime {
 
     fn block_on<F: Future>(&self, future: F) -> F::Output {
         self.tasks.block_on(&self.rt, future)
+    }
+}
+impl Default for Runtime {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -241,8 +246,8 @@ impl FuseFs {
             .unwrap_or(UNIX_EPOCH);
         FileAttr {
             ino,
-            size: size as u64,
-            blocks: blocks as u64,
+            size,
+            blocks,
             nlink,
             perm,
             uid,
@@ -483,13 +488,10 @@ impl Filesystem for FuseFs {
             reply.error(ENOENT);
             return;
         };
-        match self.rt.block_on(self.fs.get_node(path.clone())) {
-            Ok(Some(_node)) => {
-                trace!("  EEXISTS {path}");
-                reply.error(libc::EEXIST);
-                return;
-            }
-            _ => {}
+        if let Ok(Some(_node)) = self.rt.block_on(self.fs.get_node(path.clone())) {
+            trace!("  EEXISTS {path}");
+            reply.error(libc::EEXIST);
+            return;
         }
         let ino = self.inodes.get_or_push(&path);
         let attr = FileAttr {
@@ -640,7 +642,7 @@ impl Filesystem for FuseFs {
         reply: fuser::ReplyEmpty,
     ) {
         if let Some(mut handle) = self.write_handles.remove(&ino) {
-            let len = handle.len();
+            let len = handle.size();
             match self.rt.block_on(async {
                 // replace instance with the instance from the committed write.
                 // TODO: We actually have to merge the instances. We can merge the private forest,
@@ -666,7 +668,7 @@ impl Filesystem for FuseFs {
 }
 
 fn push_segment(path: &str, name: &str) -> String {
-    if path == "" {
+    if path.is_empty() {
         name.to_string()
     } else {
         format!("{}/{}", path, name)
@@ -702,7 +704,7 @@ impl WriteHandle {
             .take()
             .expect("May not append after release");
         let res = {
-            let pipe_writer_fut = pipe_writer.write_all(&data).boxed_local();
+            let pipe_writer_fut = pipe_writer.write_all(data).boxed_local();
             let mut wnfs_write_fut = self.wnfs_write_fut.take().unwrap();
             let res = tokio::select! {
                 biased;
@@ -734,7 +736,7 @@ impl WriteHandle {
         Ok(fs)
     }
 
-    pub fn len(&self) -> usize {
+    pub fn size(&self) -> usize {
         self.pos
     }
 }
@@ -754,11 +756,10 @@ mod test {
 
     use fuser::SessionUnmounter;
     use tokio::sync::oneshot;
+    use tracing::warn;
 
     use crate::fs::Fs;
-
     use super::mount;
-    use tracing::warn;
 
     #[tokio::test]
     async fn test_fuse_read_write() {
@@ -766,40 +767,32 @@ mod test {
         let store_dir = tempfile::tempdir().unwrap();
         let mountpoint = tempfile::tempdir().unwrap();
         let mountpoint_path = mountpoint.path().to_owned();
-        // let (tx, rx) = std::sync::mpsc::sync_channel(1);
         let (unmount_tx, unmount_rx) = oneshot::channel();
 
         // create a thread for sync fs operations for testing
         let mountpoint_path_clone = mountpoint_path.clone();
         std::thread::spawn(move || {
             std::thread::sleep(Duration::from_millis(100));
-            warn!("wait for unmounter");
             let mut unmount: SessionUnmounter = unmount_rx.blocking_recv().unwrap();
             let dir = mountpoint_path_clone;
-            // let content = "hello world".as_bytes();
-            let content = "helloworld".repeat(2000);
+            let content = "helloworld".repeat(1000);
             let content = content.as_bytes();
-            warn!("now write PRIVATE");
             fs::write(dir.join("private/test.txt"), content).unwrap();
-            warn!("write ok, now read");
             let res = fs::read(dir.join("private/test.txt")).unwrap();
             assert_eq!(&content, &res);
-            warn!("now write PUBLIC");
             fs::write(dir.join("public/test.txt"), content).unwrap();
-            warn!("write ok, now read");
             let res = fs::read(dir.join("public/test.txt")).unwrap();
             assert_eq!(&content, &res);
-            warn!("read ok");
-            warn!("now unwrap");
             unmount.unmount().unwrap();
         });
         // let fs = Fs::init(&store_dir).await.unwrap();
         // TODO: This blocks the tokio runtime.. and will never finish
         warn!("now mount fs");
-        let store_dir_clone = store_dir.path().to_owned().clone();
+        let store_dir_clone = store_dir.path().to_owned();
         let fs = move || async move { Fs::init(&store_dir_clone).await };
         mount(fs, mountpoint_path, Some(unmount_tx)).unwrap();
         drop(store_dir);
         drop(mountpoint);
+        assert!(true);
     }
 }

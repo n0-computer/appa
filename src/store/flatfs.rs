@@ -364,8 +364,8 @@ impl Flatfs {
                 if bytes.is_empty() {
                     break;
                 }
-                hasher.update(&bytes);
-                tempfile.write_all(&bytes).await?;
+                hasher.update(bytes);
+                tempfile.write_all(bytes).await?;
                 bytes.len()
             };
             reader.consume(len);

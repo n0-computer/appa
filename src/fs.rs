@@ -229,7 +229,7 @@ impl Fs {
             PathSegments::Public(path) => {
                 let content_cid = self
                     .store
-                    .put_block_streaming(content, libipld::IpldCodec::Raw.into())
+                    .put_block_streaming(content, libipld::IpldCodec::Raw)
                     .await?;
 
                 self.public
