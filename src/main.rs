@@ -269,8 +269,8 @@ async fn main() -> Result<()> {
 
         #[cfg(feature = "fuse")]
         Commands::Mount { mountpoint } => {
-            let fs = Fs::load(&ROOT_DIR).await?;
-            appa::fuse::mount(fs, mountpoint)?;
+            let fs = || async move { Fs::load(&ROOT_DIR).await };
+            appa::fuse::mount(fs, mountpoint, None)?;
         }
     }
 

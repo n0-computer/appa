@@ -10,7 +10,7 @@ use chrono::Utc;
 use cid::Cid;
 use futures::StreamExt;
 use tokio::io::AsyncRead;
-use tracing::debug;
+use tracing::{debug};
 use wnfs::{
     common::{BlockStore, HashOutput},
     namefilter::Namefilter,
@@ -55,7 +55,7 @@ impl Commit {
     }
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct Fs {
     store: store::Store,
     public: Rc<PublicDirectory>,
@@ -132,7 +132,7 @@ impl Fs {
             .context("private")?;
 
         debug!(
-            "Loaded commit: PrivateNode     at {}",
+            "Loaded commit: PrivateDirectory at {}",
             latest_commit.private_content_cid
         );
 

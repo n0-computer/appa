@@ -6,16 +6,21 @@
 
 use std::collections::HashMap;
 use std::ffi::OsStr;
-use std::future::Future;
+use std::future::{Future};
 use std::os::unix::prelude::MetadataExt;
 use std::path::Path;
+use std::pin::Pin;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use fuser::{
     FileAttr, FileType, Filesystem, MountOption, ReplyAttr, ReplyData, ReplyDirectory, ReplyEntry,
-    Request,
+    Request, SessionUnmounter,
 };
+use futures::FutureExt;
 use libc::ENOENT;
+use tokio::io::{AsyncRead, AsyncWriteExt, DuplexStream};
+use tokio::sync::oneshot;
+use tokio::task::LocalSet;
 use tracing::{debug, error, trace};
 use wnfs::private::PrivateNode;
 use wnfs::public::PublicNode;
@@ -29,25 +34,46 @@ const BLOCK_SIZE: usize = 512;
 ///
 /// Blocks forever until Ctrl-C.
 /// TODO: use fuser::spawn_mount once wnfs is Send.
-pub fn mount(fs: Fs, mountpoint: impl AsRef<Path>) -> anyhow::Result<()> {
-    let mountpoint = mountpoint.as_ref();
-    let mountpoint_meta = std::fs::metadata(mountpoint)?;
-    let config = FuseConfig {
-        uid: mountpoint_meta.uid(),
-        gid: mountpoint_meta.gid(),
-    };
-    let fs = FuseFs::new(fs, config);
-    let mountpoint = mountpoint.to_owned();
-    let options = vec![
-        // Change to RW once writing files works
-        MountOption::RW,
-        MountOption::FSName("appa-wnfs".to_string()),
-        MountOption::AutoUnmount,
-        MountOption::AllowRoot,
-    ];
-    debug!("mount FUSE at {mountpoint:?}");
-    fuser::mount2(fs, mountpoint, &options)?;
-    Ok(())
+pub fn mount<F, Fut>(
+    make_fs: F,
+    mountpoint: impl AsRef<Path>,
+    unmount_tx: Option<oneshot::Sender<SessionUnmounter>>,
+) -> anyhow::Result<()>
+where
+    F: (FnOnce() -> Fut) + Send + 'static,
+    Fut: Future<Output = anyhow::Result<Fs>>,
+{
+    let mountpoint = mountpoint.as_ref().to_owned();
+    let res = std::thread::spawn::<_, anyhow::Result<()>>(move || {
+        let rt = Runtime::new();
+        let fs = rt.block_on(make_fs())?;
+        // let mountpoint = mountpoint.as_ref();
+        let mountpoint_meta = std::fs::metadata(&mountpoint)?;
+        let config = FuseConfig {
+            uid: mountpoint_meta.uid(),
+            gid: mountpoint_meta.gid(),
+        };
+        let fs = FuseFs::new(rt, fs, config);
+        let options = vec![
+            // Change to RW once writing files works
+            MountOption::RW,
+            MountOption::FSName("appa-wnfs".to_string()),
+            MountOption::AutoUnmount,
+            MountOption::AllowRoot,
+        ];
+        debug!("mount FUSE at {mountpoint:?}");
+        let mut session = fuser::Session::new(fs, &mountpoint, &options[..])?;
+        let unmounter = session.unmount_callable();
+        if let Some(tx) = unmount_tx {
+            let _ = tx.send(unmounter);
+        }
+        session.run()?;
+        // fuser::mount2(fs, mountpoint, &options)?;
+        Ok(())
+    });
+    let res = res.join();
+    let res = res.map_err(|err| anyhow::anyhow!(format!("{:?}", err)))?;
+    res
 }
 
 /// Inode index for a filesystem.
@@ -112,6 +138,26 @@ impl Inode {
     }
 }
 
+pub struct Runtime {
+    rt: tokio::runtime::Runtime,
+    tasks: LocalSet,
+}
+
+impl Runtime {
+    pub fn new() -> Self {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let tasks = LocalSet::new();
+        Self { rt, tasks }
+    }
+
+    fn block_on<F: Future>(&self, future: F) -> F::Output {
+        self.tasks.block_on(&self.rt, future)
+    }
+}
+
 pub struct FuseConfig {
     uid: u32,
     gid: u32,
@@ -122,21 +168,23 @@ pub struct FuseFs {
     inodes: Inodes,
     config: FuseConfig,
     write_handles: HashMap<u64, WriteHandle>,
+    rt: Runtime,
 }
 
 impl FuseFs {
-    pub fn new(fs: Fs, config: FuseConfig) -> Self {
+    pub fn new(rt: Runtime, fs: Fs, config: FuseConfig) -> Self {
         let mut inodes = Inodes::default();
         // Init root inodes.
-        inodes.push("/".to_string());
-        inodes.push("/private".to_string());
-        inodes.push("/public".to_string());
+        inodes.push("".to_string());
+        inodes.push("private".to_string());
+        inodes.push("public".to_string());
 
         Self {
             fs,
             inodes,
             config,
             write_handles: Default::default(),
+            rt,
         }
     }
 
@@ -211,9 +259,9 @@ impl FuseFs {
     }
 }
 
-fn block_on<F: Future>(future: F) -> F::Output {
-    futures::executor::block_on(future)
-}
+// fn block_on<F: Future>(future: F) -> F::Output {
+//     futures::executor::block_on(future)
+// }
 
 impl Filesystem for FuseFs {
     fn lookup(&mut self, _req: &Request, parent: u64, name: &OsStr, reply: ReplyEntry) {
@@ -224,7 +272,7 @@ impl Filesystem for FuseFs {
             return;
         };
         let Inode { ino, .. } = self.inodes.get_or_push(&path);
-        match block_on(self.fs.get_node(path)) {
+        match self.rt.block_on(self.fs.get_node(path)) {
             Ok(Some(node)) => {
                 let attr = self.node_to_attr(ino, &node);
                 trace!("  ok {attr:?}");
@@ -249,7 +297,7 @@ impl Filesystem for FuseFs {
                 reply.error(ENOENT);
                 return;
             };
-        let Ok(Some(node)) = block_on(self.fs.get_node(path.into())) else {
+        let Ok(Some(node)) = self.rt.block_on(self.fs.get_node(path.into())) else {
                 trace!("  ENOENT (path not found)");
                 reply.error(ENOENT);
                 return;
@@ -276,10 +324,11 @@ impl Filesystem for FuseFs {
               reply.error(ENOENT);
               return;
         };
-        let content = block_on(
-            self.fs
-                .read_file_at(path.into(), offset as usize, size as usize),
-        );
+        let content = self.rt.block_on(self.fs.read_file_at(
+            path.into(),
+            offset as usize,
+            size as usize,
+        ));
         // let content = block_on(self.wnfs.read_file(&path));
         match content {
             Ok(data) => {
@@ -313,7 +362,7 @@ impl Filesystem for FuseFs {
             path.clone()
         };
 
-        let Ok(dir) = block_on(self.fs.ls(path.clone())) else {
+        let Ok(dir) = self.rt.block_on(self.fs.ls(path.clone())) else {
             trace!("  ENOENT (failed to get metadata)");
             reply.error(ENOENT);
             return;
@@ -331,7 +380,7 @@ impl Filesystem for FuseFs {
             // However, the metadata from `ls` does not have that info.
             // Therefore we fetch all nodes again.
             // TODO: Solve by making wnfs return nodes, not metadata, on ls
-            let node = block_on(self.fs.get_node(path.clone()));
+            let node = self.rt.block_on(self.fs.get_node(path.clone()));
             if let Ok(Some(node)) = node {
                 let kind = match node.kind() {
                     NodeKind::File => FileType::Directory,
@@ -367,8 +416,8 @@ impl Filesystem for FuseFs {
             reply.error(ENOENT);
             return;
         };
-        match block_on(self.fs.mkdir(path.clone())) {
-            Ok(_) => match block_on(self.fs.get_node(path.clone())) {
+        match self.rt.block_on(self.fs.mkdir(path.clone())) {
+            Ok(_) => match self.rt.block_on(self.fs.get_node(path.clone())) {
                 Ok(Some(node)) => {
                     let ino = self.inodes.get_or_push(&path);
                     let attr = self.node_to_attr(ino.ino, &node);
@@ -399,7 +448,7 @@ impl Filesystem for FuseFs {
             return reply.error(libc::EINVAL);
         } else if flags & libc::O_WRONLY != 0 {
             // Opened for writing
-            let write_handle = WriteHandle::new(path.clone());
+            let write_handle = WriteHandle::new(path.clone(), self.fs.clone());
             self.write_handles.insert(ino, write_handle);
         } else {
             // Opened for reading, nothing to do because reads
@@ -434,7 +483,7 @@ impl Filesystem for FuseFs {
             reply.error(ENOENT);
             return;
         };
-        match block_on(self.fs.get_node(path.clone())) {
+        match self.rt.block_on(self.fs.get_node(path.clone())) {
             Ok(Some(_node)) => {
                 trace!("  EEXISTS {path}");
                 reply.error(libc::EEXIST);
@@ -442,9 +491,9 @@ impl Filesystem for FuseFs {
             }
             _ => {}
         }
-        let ino = self.inodes.push(path);
+        let ino = self.inodes.get_or_push(&path);
         let attr = FileAttr {
-            ino,
+            ino: ino.ino,
             size: 0,
             blocks: 0,
             nlink: 2,
@@ -485,7 +534,7 @@ impl Filesystem for FuseFs {
             reply.error(libc::EBADF);
             return;
         };
-        match handle.append(offset as u64, data) {
+        match self.rt.block_on(handle.append(offset as u64, data)) {
             Ok(written) => {
                 trace!("  Write ok: {written}");
                 reply.written(written as u32);
@@ -517,7 +566,7 @@ impl Filesystem for FuseFs {
             reply.error(ENOENT);
             return;
         };
-        match block_on(self.fs.mv(old_path, new_path)) {
+        match self.rt.block_on(self.fs.mv(old_path, new_path)) {
             Ok(_) => reply.ok(),
             Err(err) => {
                 trace!("  Error {err}");
@@ -532,7 +581,7 @@ impl Filesystem for FuseFs {
             reply.error(ENOENT);
             return;
         };
-        match block_on(self.fs.rm(path)) {
+        match self.rt.block_on(self.fs.rm(path)) {
             Ok(_) => reply.ok(),
             Err(err) => {
                 trace!("  Error {err}");
@@ -590,11 +639,15 @@ impl Filesystem for FuseFs {
         _flush: bool,
         reply: fuser::ReplyEmpty,
     ) {
-        if let Some(handle) = self.write_handles.remove(&ino) {
-            let len = handle.content.len();
-            match block_on(async {
-                self.fs.write(handle.path.clone(), handle.content).await?;
-                self.fs.commit().await?;
+        if let Some(mut handle) = self.write_handles.remove(&ino) {
+            let len = handle.len();
+            match self.rt.block_on(async {
+                // replace instance with the instance from the committed write.
+                // TODO: We actually have to merge the instances. We can merge the private forest,
+                // but not yet the private directories and public directories.
+                let next_fs = handle.finish().await?;
+                // self.fs = self.fs.merge(next_fs);
+                self.fs = next_fs;
                 Ok::<(), anyhow::Error>(())
             }) {
                 Ok(()) => {
@@ -613,56 +666,140 @@ impl Filesystem for FuseFs {
 }
 
 fn push_segment(path: &str, name: &str) -> String {
-    format!("{}/{}", path, name)
+    if path == "" {
+        name.to_string()
+    } else {
+        format!("{}/{}", path, name)
+    }
 }
 
 pub struct WriteHandle {
     path: String,
     pos: usize,
-    content: Vec<u8>,
+    wnfs_write_fut: Option<Pin<Box<dyn Future<Output = anyhow::Result<Fs>> + 'static>>>,
+    pipe_writer: Option<DuplexStream>,
 }
 
 impl WriteHandle {
-    pub fn new(path: String) -> Self {
+    pub fn new(path: String, fs: Fs) -> Self {
+        let (pipe_writer, pipe_reader) = tokio::io::duplex(1024);
+        let wnfs_write_fut = wnfs_write(fs, path.clone(), pipe_reader).boxed_local();
         Self {
             path,
             pos: 0,
-            content: Vec::new(),
+            wnfs_write_fut: Some(wnfs_write_fut),
+            pipe_writer: Some(pipe_writer),
         }
     }
-    pub fn append(&mut self, offset: u64, data: &[u8]) -> anyhow::Result<usize> {
+
+    pub async fn append(&mut self, offset: u64, data: &[u8]) -> anyhow::Result<usize> {
         if offset as usize != self.pos {
             return Err(anyhow::anyhow!("Only append-only writes are supported"));
         }
         self.pos = offset as usize + data.len();
-        self.content.extend_from_slice(data);
+        let mut pipe_writer = self
+            .pipe_writer
+            .take()
+            .expect("May not append after release");
+        let res = {
+            let pipe_writer_fut = pipe_writer.write_all(&data).boxed_local();
+            let mut wnfs_write_fut = self.wnfs_write_fut.take().unwrap();
+            let res = tokio::select! {
+                biased;
+                _res = &mut wnfs_write_fut => {
+                    panic!("drive fut may not complete in append");
+                },
+                res = pipe_writer_fut => res
+            };
+            self.pipe_writer = Some(pipe_writer);
+            self.wnfs_write_fut = Some(wnfs_write_fut);
+            res
+        };
+        res?;
         Ok(data.len())
+    }
+
+    pub async fn finish(&mut self) -> anyhow::Result<Fs> {
+        // Drop the writer to signal shutdown.
+        let pipe_writer = self
+            .pipe_writer
+            .take()
+            .expect("May not finish more than once");
+        drop(pipe_writer);
+        // Complete the write
+        let wnfs_write_fut = self.wnfs_write_fut.take().unwrap();
+        let mut fs = wnfs_write_fut.await?;
+        fs.commit().await?;
+        // Return the fs instance
+        Ok(fs)
+    }
+
+    pub fn len(&self) -> usize {
+        self.pos
     }
 }
 
-// TODO: Write tests once wnfs is Send
-// #[cfg(test)]
-// mod test {
-//     use std::{time::Duration, fs};
-//
-//     use crate::{store::flatfs::FlatFsStore, fs::Wnfs};
-//
-//     use super::mount;
-//
-//     #[tokio::test]
-//     async fn test_fuse_read() {
-//         let dir = tempfile::tempdir().unwrap();
-//         let mountpoint = tempfile::tempdir().unwrap();
-//         let store = FlatFsStore::new(dir).unwrap();
-//         let fs = Wnfs::with_store(store, "test").await.unwrap();
-//         let path = &["foo".to_string()];
-//         fs::write(path, "rev1".as_bytes().to_vec());
-//         let mountpoint2 = mountpoint.
-//         std::thread::spawn(move || {
-//             std::thread::sleep(Duration::from_millis(100));
-//             let read = fs::read_to_string(mountpoint2.join("foo")).unwrap();
-//             assert_eq!("rev1", read.as_str(), "read ok");
-//         });
-//         mount(fs, mountpoint);
-//     }
-// }
+pub async fn wnfs_write(
+    mut fs: Fs,
+    dir: String,
+    content: impl AsyncRead + Send + Unpin + 'static,
+) -> anyhow::Result<Fs> {
+    fs.write(dir, content).await?;
+    Ok(fs)
+}
+
+#[cfg(test)]
+mod test {
+    use std::{fs, time::Duration};
+
+    use fuser::SessionUnmounter;
+    use tokio::sync::oneshot;
+
+    use crate::fs::Fs;
+
+    use super::mount;
+    use tracing::warn;
+
+    #[tokio::test]
+    async fn test_fuse_read_write() {
+        tracing_subscriber::fmt::init();
+        let store_dir = tempfile::tempdir().unwrap();
+        let mountpoint = tempfile::tempdir().unwrap();
+        let mountpoint_path = mountpoint.path().to_owned();
+        // let (tx, rx) = std::sync::mpsc::sync_channel(1);
+        let (unmount_tx, unmount_rx) = oneshot::channel();
+
+        // create a thread for sync fs operations for testing
+        let mountpoint_path_clone = mountpoint_path.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(100));
+            warn!("wait for unmounter");
+            let mut unmount: SessionUnmounter = unmount_rx.blocking_recv().unwrap();
+            let dir = mountpoint_path_clone;
+            // let content = "hello world".as_bytes();
+            let content = "helloworld".repeat(2000);
+            let content = content.as_bytes();
+            warn!("now write PRIVATE");
+            fs::write(dir.join("private/test.txt"), content).unwrap();
+            warn!("write ok, now read");
+            let res = fs::read(dir.join("private/test.txt")).unwrap();
+            assert_eq!(&content, &res);
+            warn!("now write PUBLIC");
+            fs::write(dir.join("public/test.txt"), content).unwrap();
+            warn!("write ok, now read");
+            let res = fs::read(dir.join("public/test.txt")).unwrap();
+            assert_eq!(&content, &res);
+            warn!("read ok");
+            warn!("now unwrap");
+            unmount.unmount().unwrap();
+        });
+        // let fs = Fs::init(&store_dir).await.unwrap();
+        // TODO: This blocks the tokio runtime.. and will never finish
+        warn!("now mount fs");
+        let store_dir_clone = store_dir.path().to_owned().clone();
+        let fs = move || async move { Fs::init(&store_dir_clone).await };
+        mount(fs, mountpoint_path, Some(unmount_tx)).unwrap();
+        drop(store_dir);
+        drop(mountpoint);
+    }
+}
