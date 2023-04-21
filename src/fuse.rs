@@ -6,7 +6,7 @@
 
 use std::collections::HashMap;
 use std::ffi::OsStr;
-use std::future::{Future};
+use std::future::Future;
 use std::os::unix::prelude::MetadataExt;
 use std::path::Path;
 use std::pin::Pin;

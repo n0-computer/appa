@@ -10,7 +10,7 @@ use chrono::Utc;
 use cid::Cid;
 use futures::StreamExt;
 use tokio::io::AsyncRead;
-use tracing::{debug};
+use tracing::debug;
 use wnfs::{
     common::{BlockStore, HashOutput},
     namefilter::Namefilter,
@@ -215,7 +215,11 @@ impl Fs {
         self.write(dir, Cursor::new(content.into_bytes())).await
     }
 
-    pub async fn write(&mut self, dir: String, content: impl AsyncRead + Send + Unpin + 'static) -> Result<()> {
+    pub async fn write(
+        &mut self,
+        dir: String,
+        content: impl AsyncRead + Send + Unpin + 'static,
+    ) -> Result<()> {
         let path = PathSegments::from_path(dir)?;
 
         match path {

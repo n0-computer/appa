@@ -103,8 +103,8 @@ enum Commands {
     Mount {
         /// Directory to mount at
         #[arg(value_name = "MOUNTPOINT")]
-        mountpoint: String
-    }
+        mountpoint: String,
+    },
 }
 
 #[tokio::main]

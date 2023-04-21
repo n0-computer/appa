@@ -1,6 +1,7 @@
 use std::{
     borrow::Cow,
-    fs::{self, File}, io,
+    fs::{self, File},
+    io,
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicU64, Ordering},
