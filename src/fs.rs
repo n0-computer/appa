@@ -215,7 +215,11 @@ impl Fs {
         self.write(dir, Cursor::new(content.into_bytes())).await
     }
 
-    pub async fn write(&mut self, dir: String, content: impl AsyncRead + Send + Unpin + 'static) -> Result<()> {
+    pub async fn write(
+        &mut self,
+        dir: String,
+        content: impl AsyncRead + Send + Unpin + 'static,
+    ) -> Result<()> {
         let path = PathSegments::from_path(dir)?;
 
         match path {
