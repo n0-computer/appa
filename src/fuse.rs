@@ -33,7 +33,6 @@ const BLOCK_SIZE: usize = 512;
 /// Mount a filesystem
 ///
 /// Blocks forever until Ctrl-C.
-/// TODO: use fuser::spawn_mount once wnfs is Send.
 pub fn mount<F, Fut>(
     make_fs: F,
     mountpoint: impl AsRef<Path>,
@@ -514,11 +513,7 @@ impl Filesystem for FuseFs {
         reply.entry(&TTL, &attr, 0);
     }
 
-    // TODO: Writes are fully collected in memory at the moment and written on release.
-    // This can be made streaming once wnfs is Send.
-    // Only append-only writes are supported.
-    // Partial writes are not cleared up until the file is released, so will lead to memory
-    // overflows potentially.
+    // Writes are streaming. Only append-only writes are supported.
     fn write(
         &mut self,
         _req: &Request<'_>,
@@ -647,8 +642,8 @@ impl Filesystem for FuseFs {
                 // replace instance with the instance from the committed write.
                 // TODO: We actually have to merge the instances. We can merge the private forest,
                 // but not yet the private directories and public directories.
+                // Or, easier TODO: Let's wrap the fs in an RwLock
                 let next_fs = handle.finish().await?;
-                // self.fs = self.fs.merge(next_fs);
                 self.fs = next_fs;
                 Ok::<(), anyhow::Error>(())
             }) {
@@ -756,10 +751,9 @@ mod test {
 
     use fuser::SessionUnmounter;
     use tokio::sync::oneshot;
-    use tracing::warn;
 
-    use crate::fs::Fs;
     use super::mount;
+    use crate::fs::Fs;
 
     #[tokio::test]
     async fn test_fuse_read_write() {
@@ -785,14 +779,10 @@ mod test {
             assert_eq!(&content, &res);
             unmount.unmount().unwrap();
         });
-        // let fs = Fs::init(&store_dir).await.unwrap();
-        // TODO: This blocks the tokio runtime.. and will never finish
-        warn!("now mount fs");
         let store_dir_clone = store_dir.path().to_owned();
         let fs = move || async move { Fs::init(&store_dir_clone).await };
         mount(fs, mountpoint_path, Some(unmount_tx)).unwrap();
         drop(store_dir);
         drop(mountpoint);
-        assert!(true);
     }
 }
