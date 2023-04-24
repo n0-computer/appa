@@ -14,7 +14,9 @@ use tracing::debug;
 use wnfs::{
     common::{BlockStore, HashOutput},
     namefilter::Namefilter,
-    private::{AesKey, PrivateDirectory, PrivateForest, PrivateNode, PrivateRef, TemporalKey},
+    private::{
+        AesKey, PrivateDirectory, PrivateFile, PrivateForest, PrivateNode, PrivateRef, TemporalKey,
+    },
     public::{PublicDirectory, PublicNode},
 };
 
@@ -55,9 +57,9 @@ impl Commit {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub struct Fs {
-    store: store::Store,
+    pub(crate) store: store::Store,
     public: Rc<PublicDirectory>,
     private_forest: Rc<PrivateForest>,
     private: Rc<PrivateDirectory>,
@@ -428,6 +430,35 @@ impl Fs {
         Ok(node)
     }
 
+    /// Start to write a file at a path.
+    ///
+    /// This returns an owned FileWriteHandle through which async writes can be performed.
+    /// To persist the created file, FileWriteHandle::finalize has to be called.
+    pub async fn start_write(&mut self, path: String) -> anyhow::Result<FileWriter> {
+        let path = PathSegments::from_path(path)?;
+        let handle = match path {
+            PathSegments::Root => anyhow::bail!("Cannot write to root"),
+            PathSegments::Private(path) => {
+                let file = self
+                    .private
+                    .open_file_mut(
+                        &path,
+                        true,
+                        Utc::now(),
+                        &mut self.private_forest,
+                        &mut self.store,
+                        &mut rand::thread_rng(),
+                    )
+                    .await?;
+                let file = file.clone();
+                FileWriter::new_private(path, file, self.private_forest.clone())
+            }
+            PathSegments::Public(path) => FileWriter::new_public(path),
+        };
+        Ok(handle)
+    }
+
+    /// Read a number of bytes from a file at a given offset.
     pub async fn read_file_at(
         &self,
         path: String,
@@ -517,6 +548,90 @@ impl Node {
             Node::Root | Node::Public(PublicNode::Dir(_)) | Node::Private(PrivateNode::Dir(_)) => 0,
         };
         Ok(size)
+    }
+}
+
+pub struct FileWriter {
+    path: Vec<String>,
+    inner: FileWriterInner,
+}
+
+enum FileWriterInner {
+    Public(Option<Cid>),
+    Private {
+        file: PrivateFile,
+        forest: Rc<PrivateForest>,
+    },
+}
+
+impl FileWriter {
+    pub fn new_public(path: Vec<String>) -> Self {
+        Self {
+            path,
+            inner: FileWriterInner::Public(None),
+        }
+    }
+    pub fn new_private(path: Vec<String>, file: PrivateFile, forest: Rc<PrivateForest>) -> Self {
+        Self {
+            path,
+            inner: FileWriterInner::Private { file, forest },
+        }
+    }
+    pub async fn write(
+        &mut self,
+        content: impl AsyncRead + Send + Unpin + 'static,
+        store: &mut store::Store,
+    ) -> anyhow::Result<()> {
+        match &mut self.inner {
+            FileWriterInner::Public(cid) => {
+                let res_cid = store
+                    .put_block_streaming(content, libipld::IpldCodec::Raw)
+                    .await?;
+                *cid = Some(res_cid);
+            }
+            FileWriterInner::Private { file, forest } => {
+                file.set_content(
+                    Utc::now(),
+                    content.compat(),
+                    forest,
+                    store,
+                    &mut rand::thread_rng(),
+                )
+                .await?;
+            }
+        }
+        Ok(())
+    }
+
+    pub async fn finalize(self, fs: &mut Fs) -> anyhow::Result<()> {
+        match self.inner {
+            FileWriterInner::Public(cid) => {
+                let cid = cid.unwrap();
+                fs.public
+                    .write(&self.path, cid, Utc::now(), &mut fs.store)
+                    .await?;
+            }
+            FileWriterInner::Private { file, forest } => {
+                // Merge forests
+                let private_forest = Rc::make_mut(&mut fs.private_forest);
+                *private_forest = private_forest.merge(&forest, &mut fs.store).await?;
+                // Update file handle
+                let upstream_file = fs
+                    .private
+                    .open_file_mut(
+                        &self.path,
+                        true,
+                        Utc::now(),
+                        &mut fs.private_forest,
+                        &mut fs.store,
+                        &mut rand::thread_rng(),
+                    )
+                    .await?;
+                // Assign the written-to file to the file within the PrivateDirectory.
+                *upstream_file = file;
+            }
+        }
+        Ok(())
     }
 }
 
@@ -699,6 +814,32 @@ mod tests {
                 assert_eq!(content_fs, content_wnfs);
             }
         }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_write_parallel() -> Result<()> {
+        let dir = tempfile::tempdir().unwrap();
+        let mut fs = Fs::init(&dir).await?;
+
+        let mut h1 = fs.start_write("private/foo/file1".to_string()).await?;
+        let mut h2 = fs.start_write("private/bar/file2".to_string()).await?;
+        let c1 = "hi1".as_bytes().to_vec();
+        let c2 = "hi2".as_bytes().to_vec();
+        let c1 = Cursor::new(c1);
+        let c2 = Cursor::new(c2);
+        let mut store = fs.store.clone();
+        h1.write(c1, &mut store).await?;
+        h2.write(c2, &mut store).await?;
+        h1.finalize(&mut fs).await?;
+        h2.finalize(&mut fs).await?;
+        fs.commit().await?;
+        drop(fs);
+        let fs = Fs::load(&dir).await?;
+        let r1 = fs.cat("/private/foo/file1".into()).await?;
+        let r2 = fs.cat("/private/bar/file2".into()).await?;
+        assert_eq!(r1, b"hi1");
+        assert_eq!(r2, b"hi2");
         Ok(())
     }
 }

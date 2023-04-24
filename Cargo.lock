@@ -3905,7 +3905,7 @@ checksum = "1a515f5799fe4961cb532f983ce2b23082366b898e52ffbce459c86f67c8378a"
 [[package]]
 name = "wnfs"
 version = "0.1.20"
-source = "git+https://github.com/frando/rs-wnfs?branch=fuse#94242126edb2c804e79aa2b496c2fc017004be90"
+source = "git+https://github.com/frando/rs-wnfs?branch=fuse#bc72ccecc683f47155b4297d13c951d6a6d3ff4c"
 dependencies = [
  "aes-gcm",
  "aes-kw",
@@ -3934,7 +3934,7 @@ dependencies = [
 [[package]]
 name = "wnfs-common"
 version = "0.1.20"
-source = "git+https://github.com/frando/rs-wnfs?branch=fuse#94242126edb2c804e79aa2b496c2fc017004be90"
+source = "git+https://github.com/frando/rs-wnfs?branch=fuse#bc72ccecc683f47155b4297d13c951d6a6d3ff4c"
 dependencies = [
  "anyhow",
  "async-once-cell",
@@ -3952,7 +3952,7 @@ dependencies = [
 [[package]]
 name = "wnfs-hamt"
 version = "0.1.20"
-source = "git+https://github.com/frando/rs-wnfs?branch=fuse#94242126edb2c804e79aa2b496c2fc017004be90"
+source = "git+https://github.com/frando/rs-wnfs?branch=fuse#bc72ccecc683f47155b4297d13c951d6a6d3ff4c"
 dependencies = [
  "anyhow",
  "async-once-cell",
@@ -3976,7 +3976,7 @@ dependencies = [
 [[package]]
 name = "wnfs-namefilter"
 version = "0.1.20"
-source = "git+https://github.com/frando/rs-wnfs?branch=fuse#94242126edb2c804e79aa2b496c2fc017004be90"
+source = "git+https://github.com/frando/rs-wnfs?branch=fuse#bc72ccecc683f47155b4297d13c951d6a6d3ff4c"
 dependencies = [
  "anyhow",
  "async-once-cell",
