@@ -269,8 +269,9 @@ async fn main() -> Result<()> {
 
         #[cfg(feature = "fuse")]
         Commands::Mount { mountpoint } => {
-            let fs = || async move { Fs::load(&ROOT_DIR).await };
-            appa::fuse::mount(fs, mountpoint, None)?;
+            let make_fs = || async move { Fs::load(&ROOT_DIR).await };
+            let handle = appa::fuse::mount(make_fs, mountpoint).await?;
+            tokio::task::spawn_blocking(move || handle.join()).await??;
         }
     }
 

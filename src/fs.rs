@@ -606,7 +606,9 @@ impl FileWriter {
     pub async fn finalize(self, fs: &mut Fs) -> anyhow::Result<()> {
         match self.inner {
             FileWriterInner::Public(cid) => {
-                let cid = cid.unwrap();
+                let cid = cid.ok_or_else(|| {
+                    anyhow::anyhow!("Called finalize before write was finished")
+                })?;
                 fs.public
                     .write(&self.path, cid, Utc::now(), &mut fs.store)
                     .await?;
@@ -615,7 +617,7 @@ impl FileWriter {
                 // Merge forests
                 let private_forest = Rc::make_mut(&mut fs.private_forest);
                 *private_forest = private_forest.merge(&forest, &mut fs.store).await?;
-                // Update file handle
+                // Get a handle to the file in the upstream PrivateDirectory
                 let upstream_file = fs
                     .private
                     .open_file_mut(
@@ -688,6 +690,8 @@ fn canonicalize_path(path: impl AsRef<Path>) -> anyhow::Result<String> {
 
 #[cfg(test)]
 mod tests {
+    use futures::future::try_join_all;
+
     use super::*;
 
     #[test]
@@ -824,22 +828,33 @@ mod tests {
 
         let mut h1 = fs.start_write("private/foo/file1".to_string()).await?;
         let mut h2 = fs.start_write("private/bar/file2".to_string()).await?;
-        let c1 = "hi1".as_bytes().to_vec();
-        let c2 = "hi2".as_bytes().to_vec();
-        let c1 = Cursor::new(c1);
-        let c2 = Cursor::new(c2);
-        let mut store = fs.store.clone();
-        h1.write(c1, &mut store).await?;
-        h2.write(c2, &mut store).await?;
+        let mut h3 = fs.start_write("public/boo/file3".to_string()).await?;
+        let c1 = Cursor::new("hi1".as_bytes().to_vec());
+        let c2 = Cursor::new("hi2".as_bytes().to_vec());
+        let c3 = Cursor::new("hi3".as_bytes().to_vec());
+        let mut store1 = fs.store.clone();
+        let mut store2 = fs.store.clone();
+        let mut store3 = fs.store.clone();
+        // Write file content in parallel (store can be cloned).
+        try_join_all([
+            h1.write(c1, &mut store1),
+            h2.write(c2, &mut store2),
+            h3.write(c3, &mut store3),
+        ])
+        .await?;
+        // Finalize sequentially (enforced though &mut fs).
         h1.finalize(&mut fs).await?;
         h2.finalize(&mut fs).await?;
+        h3.finalize(&mut fs).await?;
         fs.commit().await?;
         drop(fs);
         let fs = Fs::load(&dir).await?;
         let r1 = fs.cat("/private/foo/file1".into()).await?;
         let r2 = fs.cat("/private/bar/file2".into()).await?;
+        let r3 = fs.cat("/public/boo/file3".into()).await?;
         assert_eq!(r1, b"hi1");
         assert_eq!(r2, b"hi2");
+        assert_eq!(r3, b"hi3");
         Ok(())
     }
 }

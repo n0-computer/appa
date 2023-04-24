@@ -42,23 +42,22 @@ macro_rules! fuse_try {
     };
 }
 
-/// Mount a filesystem
+/// Mount a WNFS filesystem with FUSE
 ///
-/// Blocks forever until Ctrl-C.
-pub fn mount<F, Fut>(
-    make_fs: F,
-    mountpoint: impl AsRef<Path>,
-    unmount_tx: Option<oneshot::Sender<SessionUnmounter>>,
-) -> anyhow::Result<()>
+/// This spawns FUSE on a seperate thread. As WNFS is not Send, the WNFS instance is constructed
+/// through a closure that is run on the FUSE thread.
+///
+/// Returns a FuseHandle that can be used to unmount the file system.
+pub async fn mount<F, Fut>(make_fs: F, mountpoint: impl AsRef<Path>) -> anyhow::Result<FuseHandle>
 where
     F: (FnOnce() -> Fut) + Send + 'static,
     Fut: Future<Output = anyhow::Result<Fs>>,
 {
     let mountpoint = mountpoint.as_ref().to_owned();
-    let res = std::thread::spawn::<_, anyhow::Result<()>>(move || {
+    let (unmount_tx, unmount_rx) = oneshot::channel();
+    let join_handle = std::thread::spawn::<_, anyhow::Result<()>>(move || {
         let rt = Runtime::new();
         let fs = rt.block_on(make_fs())?;
-        // let mountpoint = mountpoint.as_ref();
         let mountpoint_meta = std::fs::metadata(&mountpoint)?;
         let config = FuseConfig {
             uid: mountpoint_meta.uid(),
@@ -66,7 +65,6 @@ where
         };
         let fs = FuseFs::new(rt, fs, config);
         let options = vec![
-            // Change to RW once writing files works
             MountOption::RW,
             MountOption::FSName("appa-wnfs".to_string()),
             MountOption::AutoUnmount,
@@ -75,16 +73,35 @@ where
         debug!("mount FUSE at {mountpoint:?}");
         let mut session = fuser::Session::new(fs, &mountpoint, &options[..])?;
         let unmounter = session.unmount_callable();
-        if let Some(tx) = unmount_tx {
-            let _ = tx.send(unmounter);
-        }
+        let _ = unmount_tx.send(unmounter);
+        // This blocks until unmount is called.
         session.run()?;
-        // fuser::mount2(fs, mountpoint, &options)?;
         Ok(())
     });
-    let res = res.join();
+    let unmounter = unmount_rx.await?;
+    let handle = FuseHandle {
+        unmounter,
+        join_handle,
+    };
+    Ok(handle)
+}
 
-    res.map_err(|err| anyhow::anyhow!(format!("{:?}", err)))?
+pub struct FuseHandle {
+    unmounter: SessionUnmounter,
+    join_handle: std::thread::JoinHandle<anyhow::Result<()>>,
+}
+impl FuseHandle {
+    pub fn unmount(&mut self) -> anyhow::Result<()> {
+        self.unmounter.unmount()?;
+        Ok(())
+    }
+    pub fn join(self) -> anyhow::Result<()> {
+        let res = self
+            .join_handle
+            .join()
+            .map_err(|_| anyhow::anyhow!("Faile to join FUSE thread"))?;
+        res
+    }
 }
 
 /// Inode index for a filesystem.
@@ -689,8 +706,7 @@ fn push_segment(path: &str, name: &str) -> String {
 pub struct WriteHandle {
     path: String,
     pos: usize,
-    wnfs_write_fut:
-        Option<Pin<Box<dyn Future<Output = anyhow::Result<FileWriter>> + 'static>>>,
+    wnfs_write_fut: Option<Pin<Box<dyn Future<Output = anyhow::Result<FileWriter>> + 'static>>>,
     // handle: FileWriteHandle,
     pipe_writer: Option<DuplexStream>,
 }
@@ -768,26 +784,23 @@ pub async fn wnfs_write(
 mod test {
     use std::{fs, time::Duration};
 
-    use fuser::SessionUnmounter;
-    use tokio::sync::oneshot;
-
     use super::mount;
     use crate::fs::Fs;
 
     #[tokio::test]
     async fn test_fuse_read_write() {
-        tracing_subscriber::fmt::init();
         let store_dir = tempfile::tempdir().unwrap();
         let mountpoint = tempfile::tempdir().unwrap();
         let mountpoint_path = mountpoint.path().to_owned();
-        let (unmount_tx, unmount_rx) = oneshot::channel();
+
+        let store_dir_clone = store_dir.path().to_owned();
+        let fs = move || async move { Fs::init(&store_dir_clone).await };
+        let mut handle = mount(fs, mountpoint_path.clone()).await.unwrap();
 
         // create a thread for sync fs operations for testing
-        let mountpoint_path_clone = mountpoint_path.clone();
-        std::thread::spawn(move || {
+        let dir = mountpoint_path.clone();
+        tokio::task::spawn_blocking(move || {
             std::thread::sleep(Duration::from_millis(100));
-            let mut unmount: SessionUnmounter = unmount_rx.blocking_recv().unwrap();
-            let dir = mountpoint_path_clone;
             let content = "helloworld".repeat(1000);
             let content = content.as_bytes();
             fs::write(dir.join("private/test.txt"), content).unwrap();
@@ -796,28 +809,25 @@ mod test {
             fs::write(dir.join("public/test.txt"), content).unwrap();
             let res = fs::read(dir.join("public/test.txt")).unwrap();
             assert_eq!(&content, &res);
-            unmount.unmount().unwrap();
-        });
-        let store_dir_clone = store_dir.path().to_owned();
-        let fs = move || async move { Fs::init(&store_dir_clone).await };
-        mount(fs, mountpoint_path, Some(unmount_tx)).unwrap();
-        drop(store_dir);
-        drop(mountpoint);
+            handle.unmount().unwrap();
+            drop(store_dir);
+            drop(mountpoint);
+        }).await.unwrap();
     }
     #[tokio::test]
     async fn test_fuse_parallel_write() {
-        tracing_subscriber::fmt::init();
         let store_dir = tempfile::tempdir().unwrap();
         let mountpoint = tempfile::tempdir().unwrap();
         let mountpoint_path = mountpoint.path().to_owned();
-        let (unmount_tx, unmount_rx) = oneshot::channel();
+        let store_dir_clone = store_dir.path().to_owned();
+        let fs = move || async move { Fs::init(&store_dir_clone).await };
+        let mut handle = mount(fs, mountpoint_path.clone()).await.unwrap();
 
         let (write_done_tx, write_done_rx) = std::sync::mpsc::channel();
         // create a thread for sync fs operations for testing
         let dir = mountpoint_path.clone();
         let done_tx = write_done_tx.clone();
         std::thread::spawn(move || {
-            std::thread::sleep(Duration::from_millis(100));
             let content = "hello1".as_bytes();
             fs::write(dir.join("private/test1.txt"), content).unwrap();
             fs::write(dir.join("public/test1.txt"), content).unwrap();
@@ -826,15 +836,13 @@ mod test {
         let done_tx = write_done_tx.clone();
         let dir = mountpoint_path.clone();
         std::thread::spawn(move || {
-            std::thread::sleep(Duration::from_millis(100));
             let content = "hello2".as_bytes();
             fs::write(dir.join("public/test2.txt"), content).unwrap();
             fs::write(dir.join("private/test2.txt"), content).unwrap();
             done_tx.send(()).unwrap();
         });
         let dir = mountpoint_path.clone();
-        std::thread::spawn(move || {
-            let mut unmount: SessionUnmounter = unmount_rx.blocking_recv().unwrap();
+        tokio::task::spawn_blocking(move || {
             // wait for both writes to be finished.
             write_done_rx.recv().unwrap();
             write_done_rx.recv().unwrap();
@@ -847,12 +855,9 @@ mod test {
             let res = fs::read(dir.join("private/test2.txt")).unwrap();
             assert_eq!(&res, b"hello2");
             // unmount
-            unmount.unmount().unwrap();
-        });
-        let store_dir_clone = store_dir.path().to_owned();
-        let fs = move || async move { Fs::init(&store_dir_clone).await };
-        mount(fs, mountpoint_path, Some(unmount_tx)).unwrap();
-        drop(store_dir);
-        drop(mountpoint);
+            handle.unmount().unwrap();
+            drop(store_dir);
+            drop(mountpoint);
+        }).await.unwrap();
     }
 }
