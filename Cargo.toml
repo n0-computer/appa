@@ -27,6 +27,15 @@ tracing = "0.1.37"
 hex = "0.4.3"
 walkdir = "2.3.3"
 async-compat = "0.2.1"
+fuser = { version = "0.12.0", optional = true }
+libc = { version = "0.2.141", optional = true }
 
 [dev-dependencies]
 tempfile = "3.5.0"
+
+[patch.crates-io]
+wnfs = { git = "https://github.com/frando/rs-wnfs", branch = "fuse" }
+
+[features]
+default = ["fuse"]
+fuse = ["dep:fuser", "dep:libc"]

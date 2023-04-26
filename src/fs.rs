@@ -1,5 +1,5 @@
 use std::{
-    io::Cursor,
+    io::{Cursor, Read, Seek, SeekFrom},
     path::{Component, Path, PathBuf},
     rc::Rc,
 };
@@ -14,8 +14,10 @@ use tracing::debug;
 use wnfs::{
     common::{BlockStore, HashOutput},
     namefilter::Namefilter,
-    private::{AesKey, PrivateDirectory, PrivateForest, PrivateNode, PrivateRef, TemporalKey},
-    public::PublicDirectory,
+    private::{
+        AesKey, PrivateDirectory, PrivateFile, PrivateForest, PrivateNode, PrivateRef, TemporalKey,
+    },
+    public::{PublicDirectory, PublicNode},
 };
 
 use crate::{hash_manifest::HashManifest, store};
@@ -57,7 +59,7 @@ impl Commit {
 
 #[derive(Debug)]
 pub struct Fs {
-    store: store::Store,
+    pub(crate) store: store::Store,
     public: Rc<PublicDirectory>,
     private_forest: Rc<PrivateForest>,
     private: Rc<PrivateDirectory>,
@@ -132,7 +134,7 @@ impl Fs {
             .context("private")?;
 
         debug!(
-            "Loaded commit: PrivateNode     at {}",
+            "Loaded commit: PrivateDirectory at {}",
             latest_commit.private_content_cid
         );
 
@@ -399,6 +401,246 @@ impl Fs {
     pub fn current_commit(&self) -> &Commit {
         &self.commit
     }
+
+    pub async fn get_node(&self, path: String) -> anyhow::Result<Option<Node>> {
+        let path = PathSegments::from_path(path)?;
+        let node = match path {
+            PathSegments::Root => Some(Node::Root),
+            PathSegments::Private(path) => {
+                if path.is_empty() {
+                    Some(Node::Private(PrivateNode::Dir(Rc::clone(&self.private))))
+                } else {
+                    self.private
+                        .get_node(&path, false, &self.private_forest, &self.store)
+                        .await?
+                        .map(Node::Private)
+                }
+            }
+            PathSegments::Public(path) => {
+                if path.is_empty() {
+                    Some(Node::Public(PublicNode::Dir(Rc::clone(&self.public))))
+                } else {
+                    self.public
+                        .get_node(&path, &self.store)
+                        .await?
+                        .map(|node| Node::Public(node.clone()))
+                }
+            }
+        };
+        Ok(node)
+    }
+
+    /// Write a file at a path through a detached writer.
+    ///
+    /// This returns an owned DetachedWriter through which async writes can be performed.
+    /// To persist the created file, DetachedWriter::finalize has to be called to
+    /// merge the written file back into the filesystem.
+    pub async fn write_detached(&mut self, path: String) -> anyhow::Result<DetachedWriter> {
+        DetachedWriter::new(path, self).await
+    }
+
+    /// Read a number of bytes from a file at a given offset.
+    pub async fn read_file_at(
+        &self,
+        path: String,
+        offset: usize,
+        size: usize,
+    ) -> anyhow::Result<Vec<u8>> {
+        let node = self.get_node(path).await?;
+        match node {
+            None => Err(anyhow::anyhow!("Not found")),
+            Some(Node::Root)
+            | Some(Node::Private(PrivateNode::Dir(_)))
+            | Some(Node::Public(PublicNode::Dir(_))) => {
+                Err(anyhow::anyhow!("Is a directory, not a file"))
+            }
+            Some(Node::Private(PrivateNode::File(file))) => {
+                file.read_at(offset, size, &self.private_forest, &self.store)
+                    .await
+            }
+            Some(Node::Public(PublicNode::File(file))) => {
+                let cid = file.get_content_cid();
+                let mut file = self
+                    .store
+                    .get_block_as_file(*cid)?
+                    .ok_or_else(|| anyhow::anyhow!("Block not found"))?;
+                tokio::task::spawn_blocking(move || {
+                    let meta = file.metadata()?;
+                    let max_size = (offset + size).min(meta.len() as usize - offset);
+                    if max_size == 0 {
+                        return Ok(vec![]);
+                    }
+                    let mut bytes = vec![0u8; max_size];
+                    file.seek(SeekFrom::Start(offset as u64))?;
+                    tracing::debug!("public read offset {offset} size {size} {file:?}");
+                    file.read_exact(&mut bytes)?;
+                    tracing::debug!("public read offset {offset} size {size} {file:?}");
+                    Ok(bytes)
+                })
+                .await?
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum Node {
+    Root,
+    Private(PrivateNode),
+    Public(PublicNode),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum NodeKind {
+    Directory,
+    File,
+}
+
+impl Node {
+    pub fn kind(&self) -> NodeKind {
+        match self {
+            Node::Root => NodeKind::Directory,
+            Node::Private(PrivateNode::Dir(_)) => NodeKind::Directory,
+            Node::Private(PrivateNode::File(_)) => NodeKind::File,
+            Node::Public(PublicNode::Dir(_)) => NodeKind::Directory,
+            Node::Public(PublicNode::File(_)) => NodeKind::File,
+        }
+    }
+
+    pub fn is_dir(&self) -> bool {
+        matches!(self.kind(), NodeKind::Directory)
+    }
+    pub fn is_file(&self) -> bool {
+        matches!(self.kind(), NodeKind::File)
+    }
+
+    pub fn size(&self, fs: &Fs) -> anyhow::Result<u64> {
+        let size = match self {
+            Node::Private(PrivateNode::File(file)) => file.get_content_size_upper_bound() as u64,
+            Node::Public(PublicNode::File(file)) => {
+                let cid = file.get_content_cid();
+                // TODO: Does this need spawn_blocking?
+                let file = fs
+                    .store
+                    .get_block_as_file(*cid)?
+                    .ok_or_else(|| anyhow::anyhow!("Block not found"))?;
+                file.metadata()?.len()
+            }
+            Node::Root | Node::Public(PublicNode::Dir(_)) | Node::Private(PrivateNode::Dir(_)) => 0,
+        };
+        Ok(size)
+    }
+}
+
+#[derive(Debug)]
+pub struct DetachedWriter {
+    path: Vec<String>,
+    inner: DetachedWriterInner,
+}
+
+#[derive(Debug)]
+enum DetachedWriterInner {
+    Public(Option<Cid>),
+    Private {
+        file: PrivateFile,
+        forest: Rc<PrivateForest>,
+    },
+}
+
+impl DetachedWriter {
+    pub async fn new(path: String, fs: &mut Fs) -> anyhow::Result<Self> {
+        let path = PathSegments::from_path(path)?;
+        let this = match path {
+            PathSegments::Root => anyhow::bail!("Cannot write to root"),
+            PathSegments::Private(path) => {
+                let file = fs
+                    .private
+                    .open_file_mut(
+                        &path,
+                        true,
+                        Utc::now(),
+                        &mut fs.private_forest,
+                        &mut fs.store,
+                        &mut rand::thread_rng(),
+                    )
+                    .await?;
+                let file = file.clone();
+                DetachedWriter::new_private(path, file, fs.private_forest.clone())
+            }
+            PathSegments::Public(path) => DetachedWriter::new_public(path),
+        };
+        Ok(this)
+    }
+
+    pub fn new_public(path: Vec<String>) -> Self {
+        Self {
+            path,
+            inner: DetachedWriterInner::Public(None),
+        }
+    }
+    pub fn new_private(path: Vec<String>, file: PrivateFile, forest: Rc<PrivateForest>) -> Self {
+        Self {
+            path,
+            inner: DetachedWriterInner::Private { file, forest },
+        }
+    }
+    pub async fn write_all(
+        &mut self,
+        content: impl AsyncRead + Send + Unpin + 'static,
+        store: &mut store::Store,
+    ) -> anyhow::Result<()> {
+        match &mut self.inner {
+            DetachedWriterInner::Public(cid) => {
+                let res_cid = store
+                    .put_block_streaming(content, libipld::IpldCodec::Raw)
+                    .await?;
+                *cid = Some(res_cid);
+            }
+            DetachedWriterInner::Private { file, forest } => {
+                file.set_content(
+                    Utc::now(),
+                    content.compat(),
+                    forest,
+                    store,
+                    &mut rand::thread_rng(),
+                )
+                .await?;
+            }
+        }
+        Ok(())
+    }
+
+    pub async fn finalize(self, fs: &mut Fs) -> anyhow::Result<()> {
+        match self.inner {
+            DetachedWriterInner::Public(cid) => {
+                let cid = cid
+                    .ok_or_else(|| anyhow::anyhow!("Called finalize before write was finished"))?;
+                fs.public
+                    .write(&self.path, cid, Utc::now(), &fs.store)
+                    .await?;
+            }
+            DetachedWriterInner::Private { file, forest } => {
+                // Merge forests
+                let private_forest = Rc::make_mut(&mut fs.private_forest);
+                *private_forest = private_forest.merge(&forest, &mut fs.store).await?;
+                // Get a handle to the file in the upstream PrivateDirectory
+                let upstream_file = fs
+                    .private
+                    .open_file_mut(
+                        &self.path,
+                        true,
+                        Utc::now(),
+                        &mut fs.private_forest,
+                        &mut fs.store,
+                        &mut rand::thread_rng(),
+                    )
+                    .await?;
+                // Assign the written-to file to the file within the PrivateDirectory.
+                *upstream_file = file;
+            }
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -454,6 +696,8 @@ fn canonicalize_path(path: impl AsRef<Path>) -> anyhow::Result<String> {
 
 #[cfg(test)]
 mod tests {
+    use futures::future::try_join_all;
+
     use super::*;
 
     #[test]
@@ -580,6 +824,43 @@ mod tests {
                 assert_eq!(content_fs, content_wnfs);
             }
         }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_write_parallel() -> Result<()> {
+        let dir = tempfile::tempdir().unwrap();
+        let mut fs = Fs::init(&dir).await?;
+
+        let mut h1 = fs.write_detached("private/foo/file1".to_string()).await?;
+        let mut h2 = fs.write_detached("private/bar/file2".to_string()).await?;
+        let mut h3 = fs.write_detached("public/boo/file3".to_string()).await?;
+        let c1 = Cursor::new("hi1".as_bytes().to_vec());
+        let c2 = Cursor::new("hi2".as_bytes().to_vec());
+        let c3 = Cursor::new("hi3".as_bytes().to_vec());
+        let mut store1 = fs.store.clone();
+        let mut store2 = fs.store.clone();
+        let mut store3 = fs.store.clone();
+        // Write file content in parallel (store can be cloned).
+        try_join_all([
+            h1.write_all(c1, &mut store1),
+            h2.write_all(c2, &mut store2),
+            h3.write_all(c3, &mut store3),
+        ])
+        .await?;
+        // Finalize sequentially (enforced though &mut fs).
+        h1.finalize(&mut fs).await?;
+        h2.finalize(&mut fs).await?;
+        h3.finalize(&mut fs).await?;
+        fs.commit().await?;
+        drop(fs);
+        let fs = Fs::load(&dir).await?;
+        let r1 = fs.cat("/private/foo/file1".into()).await?;
+        let r2 = fs.cat("/private/bar/file2".into()).await?;
+        let r3 = fs.cat("/public/boo/file3".into()).await?;
+        assert_eq!(r1, b"hi1");
+        assert_eq!(r2, b"hi2");
+        assert_eq!(r3, b"hi3");
         Ok(())
     }
 }
