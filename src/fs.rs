@@ -430,32 +430,13 @@ impl Fs {
         Ok(node)
     }
 
-    /// Start to write a file at a path.
+    /// Write a file at a path through a detached writer.
     ///
-    /// This returns an owned FileWriteHandle through which async writes can be performed.
-    /// To persist the created file, FileWriteHandle::finalize has to be called.
-    pub async fn start_write(&mut self, path: String) -> anyhow::Result<FileWriter> {
-        let path = PathSegments::from_path(path)?;
-        let handle = match path {
-            PathSegments::Root => anyhow::bail!("Cannot write to root"),
-            PathSegments::Private(path) => {
-                let file = self
-                    .private
-                    .open_file_mut(
-                        &path,
-                        true,
-                        Utc::now(),
-                        &mut self.private_forest,
-                        &mut self.store,
-                        &mut rand::thread_rng(),
-                    )
-                    .await?;
-                let file = file.clone();
-                FileWriter::new_private(path, file, self.private_forest.clone())
-            }
-            PathSegments::Public(path) => FileWriter::new_public(path),
-        };
-        Ok(handle)
+    /// This returns an owned DetachedWriter through which async writes can be performed.
+    /// To persist the created file, DetachedWriter::finalize has to be called to
+    /// merge the written file back into the filesystem.
+    pub async fn write_detached(&mut self, path: String) -> anyhow::Result<DetachedWriter> {
+        DetachedWriter::new(path, self).await
     }
 
     /// Read a number of bytes from a file at a given offset.
@@ -551,12 +532,14 @@ impl Node {
     }
 }
 
-pub struct FileWriter {
+#[derive(Debug)]
+pub struct DetachedWriter {
     path: Vec<String>,
-    inner: FileWriterInner,
+    inner: DetachedWriterInner,
 }
 
-enum FileWriterInner {
+#[derive(Debug)]
+enum DetachedWriterInner {
     Public(Option<Cid>),
     Private {
         file: PrivateFile,
@@ -564,32 +547,56 @@ enum FileWriterInner {
     },
 }
 
-impl FileWriter {
+impl DetachedWriter {
+    pub async fn new(path: String, fs: &mut Fs) -> anyhow::Result<Self> {
+        let path = PathSegments::from_path(path)?;
+        let this = match path {
+            PathSegments::Root => anyhow::bail!("Cannot write to root"),
+            PathSegments::Private(path) => {
+                let file = fs
+                    .private
+                    .open_file_mut(
+                        &path,
+                        true,
+                        Utc::now(),
+                        &mut fs.private_forest,
+                        &mut fs.store,
+                        &mut rand::thread_rng(),
+                    )
+                    .await?;
+                let file = file.clone();
+                DetachedWriter::new_private(path, file, fs.private_forest.clone())
+            }
+            PathSegments::Public(path) => DetachedWriter::new_public(path),
+        };
+        Ok(this)
+    }
+
     pub fn new_public(path: Vec<String>) -> Self {
         Self {
             path,
-            inner: FileWriterInner::Public(None),
+            inner: DetachedWriterInner::Public(None),
         }
     }
     pub fn new_private(path: Vec<String>, file: PrivateFile, forest: Rc<PrivateForest>) -> Self {
         Self {
             path,
-            inner: FileWriterInner::Private { file, forest },
+            inner: DetachedWriterInner::Private { file, forest },
         }
     }
-    pub async fn write(
+    pub async fn write_all(
         &mut self,
         content: impl AsyncRead + Send + Unpin + 'static,
         store: &mut store::Store,
     ) -> anyhow::Result<()> {
         match &mut self.inner {
-            FileWriterInner::Public(cid) => {
+            DetachedWriterInner::Public(cid) => {
                 let res_cid = store
                     .put_block_streaming(content, libipld::IpldCodec::Raw)
                     .await?;
                 *cid = Some(res_cid);
             }
-            FileWriterInner::Private { file, forest } => {
+            DetachedWriterInner::Private { file, forest } => {
                 file.set_content(
                     Utc::now(),
                     content.compat(),
@@ -605,15 +612,14 @@ impl FileWriter {
 
     pub async fn finalize(self, fs: &mut Fs) -> anyhow::Result<()> {
         match self.inner {
-            FileWriterInner::Public(cid) => {
-                let cid = cid.ok_or_else(|| {
-                    anyhow::anyhow!("Called finalize before write was finished")
-                })?;
+            DetachedWriterInner::Public(cid) => {
+                let cid = cid
+                    .ok_or_else(|| anyhow::anyhow!("Called finalize before write was finished"))?;
                 fs.public
-                    .write(&self.path, cid, Utc::now(), &mut fs.store)
+                    .write(&self.path, cid, Utc::now(), &fs.store)
                     .await?;
             }
-            FileWriterInner::Private { file, forest } => {
+            DetachedWriterInner::Private { file, forest } => {
                 // Merge forests
                 let private_forest = Rc::make_mut(&mut fs.private_forest);
                 *private_forest = private_forest.merge(&forest, &mut fs.store).await?;
@@ -826,9 +832,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut fs = Fs::init(&dir).await?;
 
-        let mut h1 = fs.start_write("private/foo/file1".to_string()).await?;
-        let mut h2 = fs.start_write("private/bar/file2".to_string()).await?;
-        let mut h3 = fs.start_write("public/boo/file3".to_string()).await?;
+        let mut h1 = fs.write_detached("private/foo/file1".to_string()).await?;
+        let mut h2 = fs.write_detached("private/bar/file2".to_string()).await?;
+        let mut h3 = fs.write_detached("public/boo/file3".to_string()).await?;
         let c1 = Cursor::new("hi1".as_bytes().to_vec());
         let c2 = Cursor::new("hi2".as_bytes().to_vec());
         let c3 = Cursor::new("hi3".as_bytes().to_vec());
@@ -837,9 +843,9 @@ mod tests {
         let mut store3 = fs.store.clone();
         // Write file content in parallel (store can be cloned).
         try_join_all([
-            h1.write(c1, &mut store1),
-            h2.write(c2, &mut store2),
-            h3.write(c3, &mut store3),
+            h1.write_all(c1, &mut store1),
+            h2.write_all(c2, &mut store2),
+            h3.write_all(c3, &mut store3),
         ])
         .await?;
         // Finalize sequentially (enforced though &mut fs).
