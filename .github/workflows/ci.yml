@@ -116,10 +116,10 @@ jobs:
       run: cargo install cross
 
     - name: check
-      run: cross check --all --target ${{ matrix.target }}
+      run: cross check --all --target ${{ matrix.target }} -v
 
     - name: test
-      run: cross test --all --target ${{ matrix.target }}
+      run: cross test --all --target ${{ matrix.target }} -v
 
   check_fmt_and_docs:
     name: Checking fmt and docs
