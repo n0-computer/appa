@@ -831,14 +831,13 @@ mod test {
     async fn test_fuse_read_write() {
         let store_dir = tempfile::tempdir().unwrap();
         let mountpoint_dir = tempfile::tempdir().unwrap();
-        let mountpoint_path = mountpoint_dir.path().to_owned();
 
-        let store_dir_clone = store_dir.path().to_owned();
-        let fs = move || async move { Fs::init(&store_dir_clone).await };
-        let handle = mount(fs, mountpoint_path.clone()).await.unwrap();
+        let store_path = store_dir.path().to_owned();
+        let fs = move || async move { Fs::init(&store_path).await };
+        let handle = mount(fs, mountpoint_dir.path()).await.unwrap();
 
         // create a thread for sync fs operations for testing
-        let dir = mountpoint_path.clone();
+        let dir = mountpoint_dir.path().to_owned();
         tokio::task::spawn_blocking(move || {
             std::thread::sleep(Duration::from_millis(100));
             let content = "helloworld".repeat(1000);
@@ -861,13 +860,14 @@ mod test {
     async fn test_fuse_parallel_write() {
         let store_dir = tempfile::tempdir().unwrap();
         let mountpoint_dir = tempfile::tempdir().unwrap();
-        let mountpoint_path = mountpoint_dir.path().to_owned();
-        let store_dir_clone = store_dir.path().to_owned();
-        let fs = move || async move { Fs::init(&store_dir_clone).await };
-        let handle = mount(fs, mountpoint_path.clone()).await.unwrap();
+
+        let store_path = store_dir.path().to_owned();
+        let fs = move || async move { Fs::init(&store_path).await };
+
+        let handle = mount(fs, mountpoint_dir.path()).await.unwrap();
 
         let (write_done_tx, write_done_rx) = std::sync::mpsc::channel();
-        let dir = mountpoint_path.clone();
+        let dir = mountpoint_dir.path().to_owned();
         // create a threads for sync fs operations
         for i in 1..=2 {
             let done_tx = write_done_tx.clone();
@@ -887,7 +887,7 @@ mod test {
                 done_tx.send(()).unwrap();
             });
         }
-        let dir = mountpoint_path.clone();
+        let dir = mountpoint_dir.path().to_owned();
         tokio::task::spawn_blocking(move || {
             // wait for all writes to be finished.
             for _ in 0..4 {
