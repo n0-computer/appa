@@ -98,7 +98,7 @@ enum Commands {
         target: String,
     },
 
-    #[cfg(feature = "fuse")]
+    #[cfg(all(feature = "fuse", unix))]
     /// Mount with FUSE
     Mount {
         /// Directory to mount at
@@ -267,7 +267,7 @@ async fn main() -> Result<()> {
             println!("Imported {source} to {target}");
         }
 
-        #[cfg(feature = "fuse")]
+        #[cfg(all(feature = "fuse", unix))]
         Commands::Mount { mountpoint } => {
             let make_fs = || async move { Fs::load(&ROOT_DIR).await };
             let handle = appa::fuse::mount(make_fs, mountpoint).await?;

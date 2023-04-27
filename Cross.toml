@@ -1,0 +1,2 @@
+[build]
+pre-build = "cross-pre-build.sh"

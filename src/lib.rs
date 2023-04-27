@@ -1,5 +1,5 @@
 pub mod fs;
-#[cfg(feature = "fuse")]
+#[cfg(all(feature = "fuse", unix))]
 pub mod fuse;
 pub mod hash_manifest;
 pub mod store;
