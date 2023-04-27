@@ -27,6 +27,9 @@ jobs:
         sudo apt-get update
         sudo apt-get install -y fuse libfuse-dev pkg-config
 
+    - name: Configure fuse
+      run: echo 'user_allow_other' | sudo tee -a /etc/fuse.conf
+
     - name: Install FUSE (macOS)
       if: matrix.os == 'macOS-latest'
       run: |
