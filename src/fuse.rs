@@ -497,10 +497,12 @@ impl Filesystem for FuseFs {
         _req: &Request<'_>,
         parent: u64,
         name: &OsStr,
-        _mode: libc::mode_t,
+        mode: u32,
         _umask: u32,
         reply: ReplyEntry,
     ) {
+        // mode_t is u32 on Linux but u16 on macOS, so cast it here
+        let _mode = mode as libc::mode_t;
         trace!("mkdir : i{parent} {name:?}");
         let Some(path) = self.inodes.get_child_path(parent, &name.to_string_lossy()) else {
             trace!("  ENOENT: parent not found");
@@ -559,11 +561,13 @@ impl Filesystem for FuseFs {
         _req: &Request<'_>,
         parent: u64,
         name: &OsStr,
-        mode: libc::mode_t,
+        mode: u32,
         _umask: u32,
         _rdev: u32,
         reply: ReplyEntry,
     ) {
+        // mode_t is u32 on Linux but u16 on macOS, so cast it here
+        let mode = mode as libc::mode_t;
         if mode & libc::S_IFMT != libc::S_IFREG {
             error!(
                 ?parent,
