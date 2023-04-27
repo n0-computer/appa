@@ -2,5 +2,6 @@
 pre-build = [
   "dpkg --add-architecture $CROSS_DEB_ARCH", 
   "apt-get update && apt-get --assume-yes install fuse:$CROSS_DEB_ARCH libfuse-dev:$CROSS_DEB_ARCH pkg-config:$CROSS_DEB_ARCH",
-  "echo 'user_allow_other' | tee -a /etc/fuse.conf"
+  "echo user_allow_other >> /etc/fuse.conf",
+  "cat /etc/fuse.conf"
 ]     
