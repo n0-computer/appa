@@ -8,13 +8,13 @@ use std::collections::HashMap;
 use std::ffi::OsStr;
 use std::future::Future;
 use std::os::unix::prelude::MetadataExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use fuser::{
     FileAttr, FileType, Filesystem, MountOption, ReplyAttr, ReplyData, ReplyDirectory, ReplyEntry,
-    Request, SessionUnmounter,
+    Request, Session, SessionUnmounter,
 };
 use libc::ENOENT;
 use tokio::io::{AsyncWriteExt, DuplexStream};
@@ -53,31 +53,30 @@ where
     Fut: Future<Output = anyhow::Result<Fs>>,
 {
     let mountpoint = mountpoint.as_ref().to_owned();
-    let (unmount_tx, unmount_rx) = oneshot::channel();
-    let join_handle = std::thread::spawn::<_, anyhow::Result<()>>(move || {
-        let rt = Runtime::new();
-        let fs = rt.block_on(make_fs())?;
-        let mountpoint_meta = std::fs::metadata(&mountpoint)?;
-        let config = FuseConfig {
-            uid: mountpoint_meta.uid(),
-            gid: mountpoint_meta.gid(),
-        };
-        let fs = FuseFs::new(rt, fs, config);
-        let options = vec![
-            MountOption::RW,
-            MountOption::FSName("appa-wnfs".to_string()),
-            MountOption::AutoUnmount,
-            MountOption::AllowRoot,
-        ];
-        debug!("mount FUSE at {mountpoint:?}");
-        let mut session = fuser::Session::new(fs, &mountpoint, &options[..])?;
-        let unmounter = session.unmount_callable();
-        let _ = unmount_tx.send(unmounter);
-        // This blocks until unmount is called.
-        session.run()?;
-        Ok(())
+
+    // Create a channel to report back if the session was created successfully.
+    let (tx, rx) = oneshot::channel();
+
+    // Spawn a new thread in which the FUSE handler will run (with a single-threaded tokio
+    // runtime).
+    let join_handle = std::thread::spawn(move || {
+        match create_fuse_session(mountpoint, make_fs) {
+            Ok(mut session) => {
+                let unmounter = session.unmount_callable();
+                let _ = tx.send(Ok(unmounter));
+                // This blocks until unmount is called.
+                session.run()?;
+                Ok(())
+            }
+            Err(err) => {
+                let _ = tx.send(Err(err));
+                Err(anyhow::anyhow!("Failed to create FUSE session"))
+            }
+        }
     });
-    let unmounter = unmount_rx.await?;
+    // Wait for the session creation to be completed, and fail with any error produced
+    // during session creation.
+    let unmounter = rx.await??;
     let handle = FuseHandle {
         unmounter,
         join_handle,
@@ -85,15 +84,56 @@ where
     Ok(handle)
 }
 
+/// Create a FUSE session. Should be run on a seperate thread outside of an async context.
+fn create_fuse_session<F, Fut>(mountpoint: PathBuf, make_fs: F) -> anyhow::Result<Session<FuseFs>>
+where
+    F: (FnOnce() -> Fut) + 'static,
+    Fut: Future<Output = anyhow::Result<Fs>>,
+{
+    let rt = Runtime::new();
+    let fs = rt.block_on(make_fs())?;
+    let mountpoint_meta = std::fs::metadata(&mountpoint)?;
+    let config = FuseConfig {
+        uid: mountpoint_meta.uid(),
+        gid: mountpoint_meta.gid(),
+    };
+    let fs = FuseFs::new(rt, fs, config);
+    let options = vec![
+        MountOption::RW,
+        MountOption::FSName("appa-wnfs".to_string()),
+        MountOption::AutoUnmount,
+        MountOption::AllowRoot,
+    ];
+    debug!("mount FUSE at {mountpoint:?}");
+    let session = fuser::Session::new(fs, &mountpoint, &options[..])?;
+    Ok(session)
+}
+
+/// A mounted FUSE file system.
 pub struct FuseHandle {
     unmounter: SessionUnmounter,
     join_handle: std::thread::JoinHandle<anyhow::Result<()>>,
 }
 impl FuseHandle {
+    /// Unmount the file system and wait for the FUSE thread to join.
+    ///
+    /// NOTE: May block. Use spawn_blocking in an async context.
+    pub fn unmount_and_join(mut self) -> anyhow::Result<()> {
+        self.unmount()?;
+        self.join()
+    }
+
+    /// Unmount the file system.
+    ///
+    /// NOTE: May block. Use spawn_blocking in an async context.
     pub fn unmount(&mut self) -> anyhow::Result<()> {
         self.unmounter.unmount()?;
         Ok(())
     }
+
+    /// Wait for the FUSE thread to join.
+    ///
+    /// NOTE: May block. Use spawn_blocking in an async context.
     pub fn join(self) -> anyhow::Result<()> {
         let res = self
             .join_handle
