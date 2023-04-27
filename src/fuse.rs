@@ -830,8 +830,8 @@ mod test {
     #[tokio::test]
     async fn test_fuse_read_write() {
         let store_dir = tempfile::tempdir().unwrap();
-        let mountpoint = tempfile::tempdir().unwrap();
-        let mountpoint_path = mountpoint.path().to_owned();
+        let mountpoint_dir = tempfile::tempdir().unwrap();
+        let mountpoint_path = mountpoint_dir.path().to_owned();
 
         let store_dir_clone = store_dir.path().to_owned();
         let fs = move || async move { Fs::init(&store_dir_clone).await };
@@ -850,8 +850,8 @@ mod test {
             let res = fs::read(dir.join("public/test.txt")).unwrap();
             assert_eq!(&content, &res);
             handle.unmount_and_join().unwrap();
-            drop(store_dir);
-            drop(mountpoint);
+            store_dir.close().unwrap();
+            mountpoint_dir.close().unwrap();
         })
         .await
         .unwrap();
@@ -860,8 +860,8 @@ mod test {
     #[tokio::test]
     async fn test_fuse_parallel_write() {
         let store_dir = tempfile::tempdir().unwrap();
-        let mountpoint = tempfile::tempdir().unwrap();
-        let mountpoint_path = mountpoint.path().to_owned();
+        let mountpoint_dir = tempfile::tempdir().unwrap();
+        let mountpoint_path = mountpoint_dir.path().to_owned();
         let store_dir_clone = store_dir.path().to_owned();
         let fs = move || async move { Fs::init(&store_dir_clone).await };
         let handle = mount(fs, mountpoint_path.clone()).await.unwrap();
@@ -903,8 +903,8 @@ mod test {
             assert_eq!(&res, &b"secret2".repeat(1024));
             // unmount
             handle.unmount_and_join().unwrap();
-            drop(store_dir);
-            drop(mountpoint);
+            store_dir.close().unwrap();
+            mountpoint_dir.close().unwrap();
         })
         .await
         .unwrap();
