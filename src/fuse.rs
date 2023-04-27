@@ -498,7 +498,7 @@ impl Filesystem for FuseFs {
         _req: &Request<'_>,
         parent: u64,
         name: &OsStr,
-        _mode: u32,
+        _mode: libc::mode_t,
         _umask: u32,
         reply: ReplyEntry,
     ) {
@@ -560,7 +560,7 @@ impl Filesystem for FuseFs {
         _req: &Request<'_>,
         parent: u64,
         name: &OsStr,
-        mode: u32,
+        mode: libc::mode_t,
         _umask: u32,
         _rdev: u32,
         reply: ReplyEntry,
