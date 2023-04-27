@@ -135,11 +135,10 @@ impl FuseHandle {
     ///
     /// NOTE: May block. Use spawn_blocking in an async context.
     pub fn join(self) -> anyhow::Result<()> {
-        let res = self
+        self
             .join_handle
             .join()
-            .map_err(|_| anyhow::anyhow!("Faile to join FUSE thread"))?;
-        res
+            .map_err(|_| anyhow::anyhow!("Faile to join FUSE thread"))?
     }
 }
 
