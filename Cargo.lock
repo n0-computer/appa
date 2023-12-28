@@ -148,12 +148,14 @@ dependencies = [
  "backoff",
  "blake3",
  "bytes",
+ "car-mirror",
  "chrono",
  "cid",
  "clap",
  "futures",
  "hex",
  "ignore",
+ "iroh-base",
  "iroh-net",
  "libipld",
  "postcard",
@@ -483,6 +485,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "car-mirror"
+version = "0.1.0"
+source = "git+https://github.com/fission-codes/rs-car-mirror.git?branch=matheus23/upgrade-wnfs#2d3517f3eff548a0f1f3de882f4e63214d168237"
+dependencies = [
+ "anyhow",
+ "async-stream",
+ "async-trait",
+ "bytes",
+ "deterministic-bloom",
+ "futures",
+ "iroh-car",
+ "libipld",
+ "libipld-core",
+ "serde",
+ "serde_ipld_dagcbor",
+ "thiserror",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "wnfs-common",
+]
+
+[[package]]
 name = "cbor4ii"
 version = "0.2.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -572,9 +597,9 @@ dependencies = [
 
 [[package]]
 name = "clap"
-version = "4.4.11"
+version = "4.4.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bfaff671f6b22ca62406885ece523383b9b64022e341e53e009a62ebc47a45f2"
+checksum = "dcfab8ba68f3668e89f6ff60f5b205cea56aa7b769451a59f34b8682f51c056d"
 dependencies = [
  "clap_builder",
  "clap_derive",
@@ -582,9 +607,9 @@ dependencies = [
 
 [[package]]
 name = "clap_builder"
-version = "4.4.11"
+version = "4.4.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a216b506622bb1d316cd51328dce24e07bdff4a6128a47c7e7fad11878d5adbb"
+checksum = "fb7fb5e4e979aec3be7791562fcba452f94ad85e954da024396433e0e25a79e9"
 dependencies = [
  "anstream",
  "anstyle",
@@ -956,6 +981,21 @@ dependencies = [
  "quote",
  "syn 2.0.43",
  "unicode-xid",
+]
+
+[[package]]
+name = "deterministic-bloom"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "12a3873e91e360aee2403cbafd2beb42f02ace06da9b053574518f003aa2490d"
+dependencies = [
+ "bitvec",
+ "miette",
+ "rand_core",
+ "serde",
+ "thiserror",
+ "tracing",
+ "xxhash-rust",
 ]
 
 [[package]]
@@ -1816,6 +1856,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "iroh-car"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "475a6f0ebd64c87ea011021c67f10b57930f6c286e0163807066bfb83553b1b6"
+dependencies = [
+ "anyhow",
+ "cid",
+ "futures",
+ "libipld",
+ "thiserror",
+ "tokio",
+ "unsigned-varint",
+]
+
+[[package]]
 name = "iroh-io"
 version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2008,7 +2063,7 @@ version = "0.16.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7d5ba3a729b72973e456a1812b0afe2e176a376c1836cc1528e9fc98ae8cb838"
 dependencies = [
- "proc-macro-crate",
+ "proc-macro-crate 1.1.3",
  "proc-macro2",
  "quote",
  "syn 1.0.109",
@@ -2149,6 +2204,29 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f665ee40bc4a3c5590afb1e9677db74a508659dfd71e126420da8274909a0167"
 
 [[package]]
+name = "miette"
+version = "5.10.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "59bb584eaeeab6bd0226ccf3509a69d7936d148cf3d036ad350abe35e8c6856e"
+dependencies = [
+ "miette-derive",
+ "once_cell",
+ "thiserror",
+ "unicode-width",
+]
+
+[[package]]
+name = "miette-derive"
+version = "5.10.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "49e7bc1560b95a3c4a25d03de42fe76ca718ab92d1a22a55b9b4cf67b3ae635c"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.43",
+]
+
+[[package]]
 name = "mime"
 version = "0.3.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2226,7 +2304,7 @@ version = "0.8.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1d6d4752e6230d8ef7adf7bd5d8c4b1f6561c1014c5ba9a37445ccefe18aa1db"
 dependencies = [
- "proc-macro-crate",
+ "proc-macro-crate 1.1.3",
  "proc-macro-error",
  "proc-macro2",
  "quote",
@@ -2451,7 +2529,7 @@ version = "0.5.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "dcbff9bc912032c62bf65ef1d5aea88983b420f4f839db1e9b0c281a25c9c799"
 dependencies = [
- "proc-macro-crate",
+ "proc-macro-crate 1.1.3",
  "proc-macro2",
  "quote",
  "syn 1.0.109",
@@ -2463,7 +2541,7 @@ version = "0.7.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6c11e44798ad209ccdd91fc192f0526a369a01234f7373e1b141c96d7cee4f0e"
 dependencies = [
- "proc-macro-crate",
+ "proc-macro-crate 2.0.1",
  "proc-macro2",
  "quote",
  "syn 2.0.43",
@@ -2878,6 +2956,16 @@ checksum = "e17d47ce914bf4de440332250b0edd23ce48c005f59fab39d3335866b114f11a"
 dependencies = [
  "thiserror",
  "toml",
+]
+
+[[package]]
+name = "proc-macro-crate"
+version = "2.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "97dc5fea232fc28d2f597b37c4876b348a40e33f3b02cc975c8d006d78d94b1a"
+dependencies = [
+ "toml_datetime",
+ "toml_edit",
 ]
 
 [[package]]
@@ -4180,6 +4268,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "toml_datetime"
+version = "0.6.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7cda73e2f1397b1262d6dfdcef8aafae14d1de7748d66822d3bfeeb6d03e5e4b"
+
+[[package]]
+name = "toml_edit"
+version = "0.20.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "396e4d48bbb2b7554c944bde63101b5ae446cff6ec4a24227428f15eb72ef338"
+dependencies = [
+ "indexmap",
+ "toml_datetime",
+ "winnow",
+]
+
+[[package]]
 name = "tower-service"
 version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4349,6 +4454,12 @@ checksum = "5c5713f0fc4b5db668a2ac63cdb7bb4469d8c9fed047b1d0292cc7b0ce2ba921"
 dependencies = [
  "tinyvec",
 ]
+
+[[package]]
+name = "unicode-width"
+version = "0.1.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e51733f11c9c4f72aa0c160008246859e340b00807569a0da0e7a1079b27ba85"
 
 [[package]]
 name = "unicode-xid"
@@ -4842,6 +4953,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "dff9641d1cd4be8d1a070daf9e3773c5f67e78b4d9d42263020c057706765c04"
 
 [[package]]
+name = "winnow"
+version = "0.5.31"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "97a4882e6b134d6c28953a387571f1acdd3496830d5e36c5e3a1075580ea641c"
+dependencies = [
+ "memchr",
+]
+
+[[package]]
 name = "winreg"
 version = "0.50.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4868,7 +4988,7 @@ dependencies = [
 [[package]]
 name = "wnfs"
 version = "0.1.27"
-source = "git+https://github.com/wnfs-wg/rs-wnfs.git?branch=matheus23/root-tree#029cb097e179133c782ed6abe4c291a44c8fecc0"
+source = "git+https://github.com/wnfs-wg/rs-wnfs.git?branch=matheus23/root-tree#525310b9a033519922624acf8739a547d3285813"
 dependencies = [
  "aes-kw",
  "anyhow",
@@ -4907,7 +5027,7 @@ dependencies = [
 [[package]]
 name = "wnfs-common"
 version = "0.1.26"
-source = "git+https://github.com/wnfs-wg/rs-wnfs.git?branch=matheus23/root-tree#029cb097e179133c782ed6abe4c291a44c8fecc0"
+source = "git+https://github.com/wnfs-wg/rs-wnfs.git?branch=matheus23/root-tree#525310b9a033519922624acf8739a547d3285813"
 dependencies = [
  "anyhow",
  "async-once-cell",
@@ -4929,7 +5049,7 @@ dependencies = [
 [[package]]
 name = "wnfs-hamt"
 version = "0.1.26"
-source = "git+https://github.com/wnfs-wg/rs-wnfs.git?branch=matheus23/root-tree#029cb097e179133c782ed6abe4c291a44c8fecc0"
+source = "git+https://github.com/wnfs-wg/rs-wnfs.git?branch=matheus23/root-tree#525310b9a033519922624acf8739a547d3285813"
 dependencies = [
  "anyhow",
  "async-once-cell",
@@ -4958,7 +5078,7 @@ dependencies = [
 [[package]]
 name = "wnfs-nameaccumulator"
 version = "0.1.26"
-source = "git+https://github.com/wnfs-wg/rs-wnfs.git?branch=matheus23/root-tree#029cb097e179133c782ed6abe4c291a44c8fecc0"
+source = "git+https://github.com/wnfs-wg/rs-wnfs.git?branch=matheus23/root-tree#525310b9a033519922624acf8739a547d3285813"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4980,7 +5100,7 @@ dependencies = [
 [[package]]
 name = "wnfs-unixfs-file"
 version = "0.1.1"
-source = "git+https://github.com/wnfs-wg/rs-wnfs.git?branch=matheus23/root-tree#029cb097e179133c782ed6abe4c291a44c8fecc0"
+source = "git+https://github.com/wnfs-wg/rs-wnfs.git?branch=matheus23/root-tree#525310b9a033519922624acf8739a547d3285813"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -5036,6 +5156,12 @@ checksum = "d7d8a75eaf6557bb84a65ace8609883db44a29951042ada9b393151532e41fcb"
 dependencies = [
  "xml-rs",
 ]
+
+[[package]]
+name = "xxhash-rust"
+version = "0.8.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "53be06678ed9e83edb1745eb72efc0bbcd7b5c3c35711a860906aed827a13d61"
 
 [[package]]
 name = "yaml-rust"

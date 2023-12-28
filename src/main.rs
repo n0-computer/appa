@@ -3,9 +3,16 @@ use std::path::{Component, Path};
 
 use anyhow::{anyhow, Context as _, Result};
 use appa::store::flatfs::Flatfs;
+use car_mirror::common::CarFile;
+use car_mirror::messages::PullRequest;
+use car_mirror::traits::NoCache;
 use cid::Cid;
 use futures::TryStreamExt;
+use iroh_base::ticket::Ticket;
 use iroh_net::key::SecretKey;
+use iroh_net::magic_endpoint::accept_conn;
+use iroh_net::ticket::NodeTicket;
+use iroh_net::MagicEndpoint;
 use tokio::io::AsyncWriteExt;
 
 use clap::{Parser, Subcommand};
@@ -32,6 +39,12 @@ const PRIVATE_ACCESS_KEY: &str = "PRIVATE_ACCESS_KEY_V1";
 
 /// Secret key used for the iroh-net magic endpoint
 const PEER_SECRET_KEY: &str = "PEER_SECRET_KEY_V1";
+
+/// ALPN protocol identifier for the car mirror pull protocol for appa
+const ALPN_APPA_CAR_MIRROR_PULL: &[u8] = b"appa/car-mirror/pull/v0";
+
+/// ALPN protocol identifier for fetching the latest data root
+const ALPN_APPA_DATA_ROOT_FETCH: &[u8] = b"appa/data-root/fetch/v0";
 
 #[derive(Debug, Subcommand)]
 enum Commands {
@@ -82,8 +95,14 @@ enum Commands {
         #[arg(value_name = "TARGET")]
         target: String,
     },
-    /// Listen for connections
+    /// Listen for syncing requests
     Listen,
+    /// Issue a syncing request to a listening node
+    Sync {
+        /// The ticket printed on the other node's listen command
+        #[arg(value_name = "TICKET")]
+        ticket: String,
+    },
 }
 
 #[tokio::main]
@@ -160,13 +179,127 @@ async fn main() -> Result<()> {
             println!("Committed.")
         }
         Commands::Listen => {
-            println!("Unimplemented. Sorry");
+            let mut appa = Appa::load().await?;
+            let data_root = appa.fs.store().await?;
+
+            let endpoint = MagicEndpoint::builder()
+                .secret_key(appa.peer_key.clone())
+                .alpns(vec![
+                    ALPN_APPA_CAR_MIRROR_PULL.to_vec(),
+                    ALPN_APPA_DATA_ROOT_FETCH.to_vec(),
+                ])
+                .bind(0)
+                .await?;
+
+            let ticket = NodeTicket::new(endpoint.my_addr().await?)?;
+            println!("Connect with this ticket: {ticket}");
+
+            while let Some(conn) = endpoint.accept().await {
+                let (peer_id, alpn, conn) = accept_conn(conn).await?;
+                tracing::info!(
+                    "new connection from {peer_id} with ALPN {alpn} (coming from {})",
+                    conn.remote_address()
+                );
+                match alpn.as_bytes() {
+                    ALPN_APPA_DATA_ROOT_FETCH => {
+                        let (mut send, mut recv) = conn.accept_bi().await?;
+                        let msg = recv.read_to_end(100).await?;
+                        let msg = String::from_utf8(msg)?;
+                        if msg != "data-root fetch" {
+                            println!(
+                                "Wrong data root fetch msg: Expected \"data-root fetch\", got {msg}"
+                            );
+                        }
+                        send.write_all(&data_root.to_bytes()).await?;
+                        send.finish().await?;
+                    }
+                    ALPN_APPA_CAR_MIRROR_PULL => {
+                        let appa = appa.clone();
+                        tokio::spawn(async move {
+                            let (mut send, mut recv) = conn.accept_bi().await?;
+                            tracing::debug!("accepted bi stream, waiting for data...");
+                            let message = recv.read_to_end(4 * 1024).await?;
+                            let pull: PullMsg = postcard::from_bytes(&message)?;
+                            let response = car_mirror::pull::response(
+                                pull.root,
+                                pull.req,
+                                &Default::default(),
+                                &appa.fs.store,
+                                &NoCache,
+                            )
+                            .await?;
+                            send.write_all(&response.bytes).await?;
+                            send.finish().await?;
+
+                            Ok::<_, anyhow::Error>(())
+                        });
+                    }
+                    _ => {
+                        println!("Unsupported protocol identifier (ALPN): {alpn}");
+                    }
+                }
+            }
+        }
+        Commands::Sync { ticket } => {
+            let ticket: NodeTicket = Ticket::deserialize(ticket.as_ref())?;
+            let store = Flatfs::new(ROOT_DIR)?;
+
+            let endpoint = MagicEndpoint::builder()
+                .alpns(vec![
+                    ALPN_APPA_CAR_MIRROR_PULL.to_vec(),
+                    ALPN_APPA_DATA_ROOT_FETCH.to_vec(),
+                ])
+                .bind(0)
+                .await?;
+
+            let connection = endpoint
+                .connect(ticket.node_addr().clone(), ALPN_APPA_DATA_ROOT_FETCH)
+                .await?;
+
+            let (mut send, mut recv) = connection.open_bi().await?;
+            send.write_all(b"data-root fetch").await?;
+            let root = Cid::read_bytes(Cursor::new(recv.read_to_end(100).await?))?;
+
+            println!("Fetched data root: {root}");
+
+            let connection = endpoint
+                .connect(ticket.node_addr().clone(), ALPN_APPA_CAR_MIRROR_PULL)
+                .await?;
+
+            let (mut send, mut recv) = connection.open_bi().await?;
+            let config = Default::default();
+            let mut last_response = None;
+            loop {
+                let req = car_mirror::pull::request(root, last_response, &config, &store, &NoCache)
+                    .await?;
+                if req.indicates_finished() {
+                    println!("Done!");
+                    store.put(DATA_ROOT, root.to_bytes())?;
+                    break;
+                }
+                let msg = PullMsg { root, req };
+                let msg: Vec<u8> = postcard::to_stdvec(&msg)?;
+                send.write_all(&msg).await?;
+
+                let response = CarFile {
+                    bytes: recv.read_to_end(config.receive_maximum).await?.into(),
+                };
+
+                last_response = Some(response);
+            }
         }
     }
 
     Ok(())
 }
 
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct PullMsg {
+    root: Cid,
+    req: PullRequest,
+}
+
+#[derive(Debug, Clone)]
 struct Appa {
     fs: RootTree<Flatfs>,
     peer_key: SecretKey,
