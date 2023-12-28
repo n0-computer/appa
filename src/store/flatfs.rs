@@ -419,7 +419,7 @@ mod tests {
         use wnfs::common::BlockStore;
 
         let dir = tempfile::tempdir().unwrap();
-        let mut flatfs = Flatfs::new(dir.path()).unwrap();
+        let flatfs = Flatfs::new(dir.path()).unwrap();
 
         let data = b"hello world";
         let cid = flatfs
