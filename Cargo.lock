@@ -163,6 +163,7 @@ dependencies = [
  "serde",
  "tempfile",
  "tokio",
+ "tokio-util",
  "tracing",
  "tracing-subscriber",
  "walkdir",
@@ -455,9 +456,9 @@ checksum = "78a6932c88f1d2c29533a3b8a5f5a2f84cc19c3339b431677c3160c5c2e6ca85"
 
 [[package]]
 name = "bstr"
-version = "1.8.0"
+version = "1.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "542f33a8835a0884b006a0c3df3dadd99c0c3f296ed26c2fdc8028e01ad6230c"
+checksum = "c48f0051a4b4c5e0b6d365cd04af53aeaa209e3cc15ec2cdb69e73cc87fbd0dc"
 dependencies = [
  "memchr",
  "serde",
@@ -487,7 +488,7 @@ dependencies = [
 [[package]]
 name = "car-mirror"
 version = "0.1.0"
-source = "git+https://github.com/fission-codes/rs-car-mirror.git?branch=matheus23/upgrade-wnfs#2d3517f3eff548a0f1f3de882f4e63214d168237"
+source = "git+https://github.com/fission-codes/rs-car-mirror.git?branch=matheus23/upgrade-wnfs#0b3685a9ee51d8050e538e0314ac84d7af43ee68"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -2199,9 +2200,9 @@ checksum = "df39d232f5c40b0891c10216992c2f250c054105cb1e56f0fc9032db6203ecc1"
 
 [[package]]
 name = "memchr"
-version = "2.6.4"
+version = "2.7.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f665ee40bc4a3c5590afb1e9677db74a508659dfd71e126420da8274909a0167"
+checksum = "523dc4f511e55ab87b694dc30d0f820d60906ef06413f93d4d7a1385599cc149"
 
 [[package]]
 name = "miette"
@@ -4988,7 +4989,7 @@ dependencies = [
 [[package]]
 name = "wnfs"
 version = "0.1.27"
-source = "git+https://github.com/wnfs-wg/rs-wnfs.git?branch=matheus23/root-tree#525310b9a033519922624acf8739a547d3285813"
+source = "git+https://github.com/wnfs-wg/rs-wnfs.git?branch=matheus23/root-tree#31d3a8bc0781fb2106adba0f5f7c5650ce9b5dcf"
 dependencies = [
  "aes-kw",
  "anyhow",
@@ -5027,7 +5028,7 @@ dependencies = [
 [[package]]
 name = "wnfs-common"
 version = "0.1.26"
-source = "git+https://github.com/wnfs-wg/rs-wnfs.git?branch=matheus23/root-tree#525310b9a033519922624acf8739a547d3285813"
+source = "git+https://github.com/wnfs-wg/rs-wnfs.git?branch=matheus23/root-tree#31d3a8bc0781fb2106adba0f5f7c5650ce9b5dcf"
 dependencies = [
  "anyhow",
  "async-once-cell",
@@ -5049,7 +5050,7 @@ dependencies = [
 [[package]]
 name = "wnfs-hamt"
 version = "0.1.26"
-source = "git+https://github.com/wnfs-wg/rs-wnfs.git?branch=matheus23/root-tree#525310b9a033519922624acf8739a547d3285813"
+source = "git+https://github.com/wnfs-wg/rs-wnfs.git?branch=matheus23/root-tree#31d3a8bc0781fb2106adba0f5f7c5650ce9b5dcf"
 dependencies = [
  "anyhow",
  "async-once-cell",
@@ -5078,7 +5079,7 @@ dependencies = [
 [[package]]
 name = "wnfs-nameaccumulator"
 version = "0.1.26"
-source = "git+https://github.com/wnfs-wg/rs-wnfs.git?branch=matheus23/root-tree#525310b9a033519922624acf8739a547d3285813"
+source = "git+https://github.com/wnfs-wg/rs-wnfs.git?branch=matheus23/root-tree#31d3a8bc0781fb2106adba0f5f7c5650ce9b5dcf"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -5100,7 +5101,7 @@ dependencies = [
 [[package]]
 name = "wnfs-unixfs-file"
 version = "0.1.1"
-source = "git+https://github.com/wnfs-wg/rs-wnfs.git?branch=matheus23/root-tree#525310b9a033519922624acf8739a547d3285813"
+source = "git+https://github.com/wnfs-wg/rs-wnfs.git?branch=matheus23/root-tree#31d3a8bc0781fb2106adba0f5f7c5650ce9b5dcf"
 dependencies = [
  "anyhow",
  "async-stream",

@@ -10,6 +10,7 @@ use std::{
     },
     time::{Duration, SystemTime},
 };
+use wnfs::common::BlockStoreError;
 
 #[derive(Debug, Clone)]
 pub struct Flatfs {
@@ -243,7 +244,7 @@ impl Flatfs {
     pub(crate) fn get_block_sync(&self, cid: cid::Cid) -> Result<Bytes> {
         match self.get(&Self::key_for_cid(cid)) {
             Ok(Some(res)) => Ok(Bytes::from(res)),
-            Ok(None) => Err(wnfs::error::FsError::NotFound.into()),
+            Ok(None) => Err(BlockStoreError::CIDNotFound(cid).into()),
             Err(err) => Err(err),
         }
     }

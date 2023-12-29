@@ -4,18 +4,20 @@ use std::path::{Component, Path};
 use anyhow::{anyhow, Context as _, Result};
 use appa::store::flatfs::Flatfs;
 use car_mirror::common::CarFile;
-use car_mirror::messages::PullRequest;
+use car_mirror::messages::{Bloom, PullRequest};
 use car_mirror::traits::NoCache;
 use cid::Cid;
-use futures::TryStreamExt;
+use futures::{SinkExt, StreamExt, TryStreamExt};
 use iroh_base::ticket::Ticket;
 use iroh_net::key::SecretKey;
 use iroh_net::magic_endpoint::accept_conn;
 use iroh_net::ticket::NodeTicket;
 use iroh_net::MagicEndpoint;
+use libipld::codec::Decode;
 use tokio::io::AsyncWriteExt;
 
 use clap::{Parser, Subcommand};
+use tokio_util::codec::LengthDelimitedCodec;
 use tracing_subscriber::{prelude::*, EnvFilter};
 use wnfs::private::AccessKey;
 use wnfs::root_tree::RootTree;
@@ -203,7 +205,9 @@ async fn main() -> Result<()> {
                 match alpn.as_bytes() {
                     ALPN_APPA_DATA_ROOT_FETCH => {
                         let (mut send, mut recv) = conn.accept_bi().await?;
+                        tracing::info!("Waiting for data...");
                         let msg = recv.read_to_end(100).await?;
+                        tracing::info!("Got data!");
                         let msg = String::from_utf8(msg)?;
                         if msg != "data-root fetch" {
                             println!(
@@ -215,21 +219,38 @@ async fn main() -> Result<()> {
                     }
                     ALPN_APPA_CAR_MIRROR_PULL => {
                         let appa = appa.clone();
+                        let config = car_mirror::common::Config::default();
                         tokio::spawn(async move {
-                            let (mut send, mut recv) = conn.accept_bi().await?;
+                            let (send, recv) = conn.accept_bi().await?;
+
+                            let mut recv = LengthDelimitedCodec::builder()
+                                .max_frame_length(4 * 1024)
+                                .new_read(recv);
+
+                            let mut send = LengthDelimitedCodec::builder()
+                                .max_frame_length(config.receive_maximum)
+                                .new_write(send);
+
                             tracing::debug!("accepted bi stream, waiting for data...");
-                            let message = recv.read_to_end(4 * 1024).await?;
-                            let pull: PullMsg = postcard::from_bytes(&message)?;
+                            let Some(message) = recv.try_next().await? else {
+                                tracing::info!("Got EOF, closing.");
+                                return Ok(());
+                            };
+                            tracing::info!("got pull message");
+
+                            let (root, request) =
+                                postcard::from_bytes::<PullMsg>(&message)?.into_parts()?;
+
                             let response = car_mirror::pull::response(
-                                pull.root,
-                                pull.req,
-                                &Default::default(),
+                                root,
+                                request,
+                                &config,
                                 &appa.fs.store,
                                 &NoCache,
                             )
                             .await?;
-                            send.write_all(&response.bytes).await?;
-                            send.finish().await?;
+
+                            send.send(response.bytes).await?;
 
                             Ok::<_, anyhow::Error>(())
                         });
@@ -243,6 +264,7 @@ async fn main() -> Result<()> {
         Commands::Sync { ticket } => {
             let ticket: NodeTicket = Ticket::deserialize(ticket.as_ref())?;
             let store = Flatfs::new(ROOT_DIR)?;
+            let config = car_mirror::common::Config::default();
 
             let endpoint = MagicEndpoint::builder()
                 .alpns(vec![
@@ -252,12 +274,14 @@ async fn main() -> Result<()> {
                 .bind(0)
                 .await?;
 
+            tracing::info!("Opening connection");
             let connection = endpoint
                 .connect(ticket.node_addr().clone(), ALPN_APPA_DATA_ROOT_FETCH)
                 .await?;
 
             let (mut send, mut recv) = connection.open_bi().await?;
             send.write_all(b"data-root fetch").await?;
+            send.finish().await?;
             let root = Cid::read_bytes(Cursor::new(recv.read_to_end(100).await?))?;
 
             println!("Fetched data root: {root}");
@@ -266,8 +290,14 @@ async fn main() -> Result<()> {
                 .connect(ticket.node_addr().clone(), ALPN_APPA_CAR_MIRROR_PULL)
                 .await?;
 
-            let (mut send, mut recv) = connection.open_bi().await?;
-            let config = Default::default();
+            let (send, recv) = connection.open_bi().await?;
+            let mut send = LengthDelimitedCodec::builder()
+                .max_frame_length(4 * 1024)
+                .new_write(send);
+            let mut recv = LengthDelimitedCodec::builder()
+                .max_frame_length(config.receive_maximum)
+                .new_read(recv);
+
             let mut last_response = None;
             loop {
                 let req = car_mirror::pull::request(root, last_response, &config, &store, &NoCache)
@@ -277,13 +307,19 @@ async fn main() -> Result<()> {
                     store.put(DATA_ROOT, root.to_bytes())?;
                     break;
                 }
-                let msg = PullMsg { root, req };
-                let msg: Vec<u8> = postcard::to_stdvec(&msg)?;
-                send.write_all(&msg).await?;
+                let msg = postcard::to_stdvec(&PullMsg::new(root, req))?;
+                tracing::info!("Sending pull msg");
+                send.send(msg.into()).await?;
+                tracing::info!("Pull msg sent, waiting for response");
 
-                let response = CarFile {
-                    bytes: recv.read_to_end(config.receive_maximum).await?.into(),
+                let Some(bytes) = recv.try_next().await? else {
+                    println!("Prematurely closed stream! Aborting.");
+                    break;
                 };
+                let response = CarFile {
+                    bytes: bytes.into(),
+                };
+                tracing::info!("Response received, {} bytes", response.bytes.len());
 
                 last_response = Some(response);
             }
@@ -295,8 +331,35 @@ async fn main() -> Result<()> {
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 struct PullMsg {
-    root: Cid,
-    req: PullRequest,
+    root: Vec<u8>,
+    resources: Vec<Vec<u8>>,
+    bloom: Bloom,
+}
+
+impl PullMsg {
+    fn new(root: Cid, request: PullRequest) -> Self {
+        Self {
+            root: root.to_bytes(),
+            bloom: request.bloom,
+            resources: request.resources.iter().map(Cid::to_bytes).collect(),
+        }
+    }
+
+    fn into_parts(self) -> Result<(Cid, PullRequest)> {
+        let root = Cid::read_bytes(Cursor::new(self.root))?;
+        let resources = self
+            .resources
+            .iter()
+            .map(|cid| Cid::read_bytes(Cursor::new(cid)))
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok((
+            root,
+            PullRequest {
+                resources,
+                bloom: self.bloom,
+            },
+        ))
+    }
 }
 
 #[derive(Debug, Clone)]
