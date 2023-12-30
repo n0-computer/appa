@@ -22,7 +22,6 @@ postcard = { version = "1", features = ["use-std"] }
 rand = "0.8"
 tokio = { version = "1.27.0", features = ["full"] }
 wnfs = { version = "0.1.27", git = "https://github.com/wnfs-wg/rs-wnfs.git", branch = "matheus23/root-tree" }
-wnfs-nameaccumulator = { git = "https://github.com/wnfs-wg/rs-wnfs.git", branch = "matheus23/root-tree", default-features = false, features = ["rug"] }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tracing = "0.1.37"
 hex = "0.4"
@@ -30,6 +29,10 @@ walkdir = "2.3"
 iroh-net = "0.12.0"
 iroh-base = "0.12.0"
 tokio-util = { version = "0.7.10", features = ["codec"] }
+
+# enable the "rug" feature (using GMP) for rs-wnfs, speeding up nameaccumulator operations
+[target.'cfg(unix)'.dependencies]
+wnfs-nameaccumulator = { git = "https://github.com/wnfs-wg/rs-wnfs.git", branch = "matheus23/root-tree", default-features = false, features = ["rug"] }
 
 [dev-dependencies]
 tempfile = "3.5.0"
