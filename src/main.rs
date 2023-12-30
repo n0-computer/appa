@@ -1,5 +1,6 @@
 use std::io::Cursor;
 use std::path::{Component, Path};
+use std::sync::Arc;
 
 use anyhow::{anyhow, Context as _, Result};
 use appa::store::flatfs::Flatfs;
@@ -183,19 +184,21 @@ async fn main() -> Result<()> {
             let mut appa = Appa::load().await?;
             let data_root = appa.fs.store().await?;
 
-            let endpoint = MagicEndpoint::builder()
-                .secret_key(appa.peer_key.clone())
-                .alpns(vec![
-                    ALPN_APPA_CAR_MIRROR_PULL.to_vec(),
-                    ALPN_APPA_DATA_ROOT_FETCH.to_vec(),
-                ])
-                .bind(0)
-                .await?;
+            let endpoint = Arc::new(
+                MagicEndpoint::builder()
+                    .secret_key(appa.peer_key.clone())
+                    .alpns(vec![
+                        ALPN_APPA_CAR_MIRROR_PULL.to_vec(),
+                        ALPN_APPA_DATA_ROOT_FETCH.to_vec(),
+                    ])
+                    .bind(0)
+                    .await?,
+            );
 
             let ticket = NodeTicket::new(endpoint.my_addr().await?)?;
             println!("Connect with this ticket: {ticket}");
 
-            while let Some(conn) = endpoint.accept().await {
+            while let Some(conn) = endpoint.clone().accept().await {
                 let (peer_id, alpn, conn) = accept_conn(conn).await?;
                 tracing::info!(
                     "new connection from {peer_id} with ALPN {alpn} (coming from {})",
@@ -218,9 +221,11 @@ async fn main() -> Result<()> {
                     }
                     ALPN_APPA_CAR_MIRROR_PULL => {
                         let appa = appa.clone();
+                        let endpoint = Arc::clone(&endpoint);
                         let config = car_mirror::common::Config::default();
                         tokio::spawn(async move {
                             let (send, recv) = conn.accept_bi().await?;
+                            tracing::debug!("accepted bi stream, waiting for data...");
 
                             let mut recv = LengthDelimitedCodec::builder()
                                 .max_frame_length(128 * 1024)
@@ -231,7 +236,13 @@ async fn main() -> Result<()> {
                                 .new_write(send);
 
                             loop {
-                                tracing::debug!("accepted bi stream, waiting for data...");
+                                let typ = endpoint
+                                    .connection_info(peer_id)
+                                    .await?
+                                    .map(|info| info.conn_type.to_string())
+                                    .unwrap_or("None".into());
+                                tracing::info!("Endpoint connection type: {typ}");
+
                                 let Some(message) = recv.try_next().await? else {
                                     tracing::info!("Got EOF, closing.");
                                     return Ok::<_, anyhow::Error>(());
