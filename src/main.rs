@@ -45,8 +45,8 @@ const PEER_SECRET_KEY: &str = "PEER_SECRET_KEY_V1";
 /// ALPN protocol identifier for the car mirror pull protocol for appa
 const ALPN_APPA_CAR_MIRROR_PULL: &[u8] = b"appa/car-mirror/pull/v0";
 
-/// ALPN protocol identifier for fetching the latest data root
-const ALPN_APPA_DATA_ROOT_FETCH: &[u8] = b"appa/data-root/fetch/v0";
+/// ALPN protocol identifier for fetching arbitrary key-value pairs from the store
+const ALPN_APPA_KEY_VALUE_FETCH: &[u8] = b"appa/key-value/fetch/v0";
 
 #[derive(Debug, Subcommand)]
 enum Commands {
@@ -181,15 +181,14 @@ async fn main() -> Result<()> {
             println!("Committed.")
         }
         Commands::Listen => {
-            let mut appa = Appa::load().await?;
-            let data_root = appa.fs.store().await?;
+            let appa = Appa::load().await?;
 
             let endpoint = Arc::new(
                 MagicEndpoint::builder()
                     .secret_key(appa.peer_key.clone())
                     .alpns(vec![
                         ALPN_APPA_CAR_MIRROR_PULL.to_vec(),
-                        ALPN_APPA_DATA_ROOT_FETCH.to_vec(),
+                        ALPN_APPA_KEY_VALUE_FETCH.to_vec(),
                     ])
                     .bind(0)
                     .await?,
@@ -205,18 +204,14 @@ async fn main() -> Result<()> {
                     conn.remote_address()
                 );
                 match alpn.as_bytes() {
-                    ALPN_APPA_DATA_ROOT_FETCH => {
+                    ALPN_APPA_KEY_VALUE_FETCH => {
                         let (mut send, mut recv) = conn.accept_bi().await?;
                         tracing::info!("Waiting for data...");
                         let msg = recv.read_to_end(100).await?;
                         tracing::info!("Got data!");
-                        let msg = String::from_utf8(msg)?;
-                        if msg != "data-root fetch" {
-                            println!(
-                                "Wrong data root fetch msg: Expected \"data-root fetch\", got {msg}"
-                            );
-                        }
-                        send.write_all(&data_root.to_bytes()).await?;
+                        let key = String::from_utf8(msg)?;
+                        let value = appa.fs.store.get(&key)?;
+                        send.write_all(&postcard::to_stdvec(&value)?).await?;
                         send.finish().await?;
                     }
                     ALPN_APPA_CAR_MIRROR_PULL => {
@@ -283,22 +278,43 @@ async fn main() -> Result<()> {
             let endpoint = MagicEndpoint::builder()
                 .alpns(vec![
                     ALPN_APPA_CAR_MIRROR_PULL.to_vec(),
-                    ALPN_APPA_DATA_ROOT_FETCH.to_vec(),
+                    ALPN_APPA_KEY_VALUE_FETCH.to_vec(),
                 ])
                 .bind(0)
                 .await?;
 
             tracing::info!("Opening connection");
             let connection = endpoint
-                .connect(ticket.node_addr().clone(), ALPN_APPA_DATA_ROOT_FETCH)
+                .connect(ticket.node_addr().clone(), ALPN_APPA_KEY_VALUE_FETCH)
                 .await?;
 
             let (mut send, mut recv) = connection.open_bi().await?;
-            send.write_all(b"data-root fetch").await?;
+            send.write_all(DATA_ROOT.as_bytes()).await?;
             send.finish().await?;
-            let root = Cid::read_bytes(Cursor::new(recv.read_to_end(100).await?))?;
+            let Some(root_bytes): Option<Vec<u8>> =
+                postcard::from_bytes(&recv.read_to_end(100).await?)?
+            else {
+                println!("No data root on remote peer.");
+                return Ok(());
+            };
+            let root = Cid::read_bytes(Cursor::new(root_bytes))?;
 
             println!("Fetched data root: {root}");
+
+            let connection = endpoint
+                .connect(ticket.node_addr().clone(), ALPN_APPA_KEY_VALUE_FETCH)
+                .await?;
+
+            let (mut send, mut recv) = connection.open_bi().await?;
+            send.write_all(PRIVATE_ACCESS_KEY.as_bytes()).await?;
+            send.finish().await?;
+            let Some(access_key_bytes): Option<Vec<u8>> =
+                postcard::from_bytes(&recv.read_to_end(200).await?)?
+            else {
+                println!("Missing access key.");
+                return Ok(());
+            };
+            println!("Fetched access key.");
 
             let connection = endpoint
                 .connect(ticket.node_addr().clone(), ALPN_APPA_CAR_MIRROR_PULL)
@@ -318,6 +334,7 @@ async fn main() -> Result<()> {
                     .await?;
                 if req.indicates_finished() {
                     println!("Done!");
+                    store.put(PRIVATE_ACCESS_KEY, &access_key_bytes)?;
                     store.put(DATA_ROOT, root.to_bytes())?;
                     break;
                 }
