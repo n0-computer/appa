@@ -7,13 +7,12 @@ use car_mirror::common::CarFile;
 use car_mirror::messages::{Bloom, PullRequest};
 use car_mirror::traits::NoCache;
 use cid::Cid;
-use futures::{SinkExt, StreamExt, TryStreamExt};
+use futures::{SinkExt, TryStreamExt};
 use iroh_base::ticket::Ticket;
 use iroh_net::key::SecretKey;
 use iroh_net::magic_endpoint::accept_conn;
 use iroh_net::ticket::NodeTicket;
 use iroh_net::MagicEndpoint;
-use libipld::codec::Decode;
 use tokio::io::AsyncWriteExt;
 
 use clap::{Parser, Subcommand};
@@ -224,35 +223,39 @@ async fn main() -> Result<()> {
                             let (send, recv) = conn.accept_bi().await?;
 
                             let mut recv = LengthDelimitedCodec::builder()
-                                .max_frame_length(4 * 1024)
+                                .max_frame_length(128 * 1024)
                                 .new_read(recv);
 
                             let mut send = LengthDelimitedCodec::builder()
                                 .max_frame_length(config.receive_maximum)
                                 .new_write(send);
 
-                            tracing::debug!("accepted bi stream, waiting for data...");
-                            let Some(message) = recv.try_next().await? else {
-                                tracing::info!("Got EOF, closing.");
-                                return Ok(());
-                            };
-                            tracing::info!("got pull message");
+                            loop {
+                                tracing::debug!("accepted bi stream, waiting for data...");
+                                let Some(message) = recv.try_next().await? else {
+                                    tracing::info!("Got EOF, closing.");
+                                    return Ok::<_, anyhow::Error>(());
+                                };
+                                tracing::info!("got pull message");
 
-                            let (root, request) =
-                                postcard::from_bytes::<PullMsg>(&message)?.into_parts()?;
+                                let (root, request) =
+                                    postcard::from_bytes::<PullMsg>(&message)?.into_parts()?;
 
-                            let response = car_mirror::pull::response(
-                                root,
-                                request,
-                                &config,
-                                &appa.fs.store,
-                                &NoCache,
-                            )
-                            .await?;
+                                tracing::info!("decoded msg");
 
-                            send.send(response.bytes).await?;
+                                let response = car_mirror::pull::response(
+                                    root,
+                                    request,
+                                    &config,
+                                    &appa.fs.store,
+                                    &NoCache,
+                                )
+                                .await?;
 
-                            Ok::<_, anyhow::Error>(())
+                                tracing::info!("Sending response ({} bytes)", response.bytes.len());
+                                send.send(response.bytes).await?;
+                                tracing::info!("Sent.");
+                            }
                         });
                     }
                     _ => {
@@ -292,7 +295,7 @@ async fn main() -> Result<()> {
 
             let (send, recv) = connection.open_bi().await?;
             let mut send = LengthDelimitedCodec::builder()
-                .max_frame_length(4 * 1024)
+                .max_frame_length(128 * 1024)
                 .new_write(send);
             let mut recv = LengthDelimitedCodec::builder()
                 .max_frame_length(config.receive_maximum)
@@ -316,10 +319,10 @@ async fn main() -> Result<()> {
                     println!("Prematurely closed stream! Aborting.");
                     break;
                 };
+                tracing::info!("Response received, {} bytes", bytes.len());
                 let response = CarFile {
                     bytes: bytes.into(),
                 };
-                tracing::info!("Response received, {} bytes", response.bytes.len());
 
                 last_response = Some(response);
             }
@@ -421,6 +424,7 @@ impl Appa {
                 .try_into()
                 .map_err(|b: Vec<u8>| anyhow!("Wrong secret key len: {}", b.len()))?,
         );
+        root_tree.store.put(PEER_SECRET_KEY, peer_key.to_bytes())?;
 
         Ok(Self {
             fs: root_tree,
