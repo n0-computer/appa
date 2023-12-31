@@ -144,6 +144,7 @@ name = "appa"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-recursion",
  "async-trait",
  "backoff",
  "blake3",
@@ -488,7 +489,6 @@ dependencies = [
 [[package]]
 name = "car-mirror"
 version = "0.1.0"
-source = "git+https://github.com/fission-codes/rs-car-mirror.git?branch=matheus23/upgrade-wnfs#0b3685a9ee51d8050e538e0314ac84d7af43ee68"
 dependencies = [
  "anyhow",
  "async-stream",

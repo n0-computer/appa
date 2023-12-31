@@ -1,26 +1,15 @@
-use std::io::Cursor;
 use std::path::{Component, Path};
-use std::sync::Arc;
 
-use anyhow::{anyhow, Context as _, Result};
-use appa::store::flatfs::Flatfs;
-use car_mirror::common::CarFile;
-use car_mirror::messages::{Bloom, PullRequest};
-use car_mirror::traits::NoCache;
-use cid::Cid;
-use futures::{SinkExt, TryStreamExt};
-use iroh_base::ticket::Ticket;
-use iroh_net::key::SecretKey;
-use iroh_net::magic_endpoint::accept_conn;
-use iroh_net::ticket::NodeTicket;
-use iroh_net::MagicEndpoint;
+use anyhow::{Context as _, Result};
+use appa::commands::doctor::doctor;
+use appa::commands::listen_sync::{listen, sync};
+use appa::state::Appa;
+use futures::TryStreamExt;
 use tokio::io::AsyncWriteExt;
 
 use clap::{Parser, Subcommand};
-use tokio_util::codec::LengthDelimitedCodec;
 use tracing_subscriber::{prelude::*, EnvFilter};
-use wnfs::private::AccessKey;
-use wnfs::root_tree::RootTree;
+use wnfs::common::Storable;
 
 #[derive(Debug, Parser)]
 #[command(name = "appa")]
@@ -29,24 +18,6 @@ struct Cli {
     #[command(subcommand)]
     command: Commands,
 }
-
-/// Appa data directory
-const ROOT_DIR: &str = ".appa";
-
-/// Key storing the latest data root CID
-const DATA_ROOT: &str = "DATA_ROOT_V1";
-
-/// Key storing the access symmetric key for the private root directory
-const PRIVATE_ACCESS_KEY: &str = "PRIVATE_ACCESS_KEY_V1";
-
-/// Secret key used for the iroh-net magic endpoint
-const PEER_SECRET_KEY: &str = "PEER_SECRET_KEY_V1";
-
-/// ALPN protocol identifier for the car mirror pull protocol for appa
-const ALPN_APPA_CAR_MIRROR_PULL: &[u8] = b"appa/car-mirror/pull/v0";
-
-/// ALPN protocol identifier for fetching arbitrary key-value pairs from the store
-const ALPN_APPA_KEY_VALUE_FETCH: &[u8] = b"appa/key-value/fetch/v0";
 
 #[derive(Debug, Subcommand)]
 enum Commands {
@@ -105,6 +76,12 @@ enum Commands {
         #[arg(value_name = "TICKET")]
         ticket: String,
     },
+    /// Debugging commands
+    Doctor {
+        /// Item to debug, e.g. CID or store key
+        #[arg(value_name = "ITEM")]
+        item: String,
+    },
 }
 
 #[tokio::main]
@@ -159,8 +136,13 @@ async fn main() -> Result<()> {
                 .await?;
             appa.commit().await?;
         }
+        Commands::Doctor { item } => {
+            doctor(item).await?;
+        }
         Commands::Import { source, target } => {
             let mut appa = Appa::load().await?;
+            let forest_cid = appa.fs.forest.store(&appa.fs.store).await?;
+            tracing::debug!(%forest_cid, "Before");
             let target_path = parse_path(target.clone())?;
             let mut files = futures::stream::iter(walkdir::WalkDir::new(&source));
             while let Some(file) = files.try_next().await? {
@@ -178,287 +160,19 @@ async fn main() -> Result<()> {
             }
             println!("Imported {source} to {target}, committing...");
             appa.commit().await?;
+            let forest_cid = appa.fs.forest.store(&appa.fs.store).await?;
+            tracing::debug!(%forest_cid, "After");
             println!("Committed.")
         }
         Commands::Listen => {
-            let appa = Appa::load().await?;
-
-            let endpoint = Arc::new(
-                MagicEndpoint::builder()
-                    .secret_key(appa.peer_key.clone())
-                    .alpns(vec![
-                        ALPN_APPA_CAR_MIRROR_PULL.to_vec(),
-                        ALPN_APPA_KEY_VALUE_FETCH.to_vec(),
-                    ])
-                    .bind(0)
-                    .await?,
-            );
-
-            let ticket = NodeTicket::new(endpoint.my_addr().await?)?;
-            println!("Connect with this ticket: {ticket}");
-
-            while let Some(conn) = endpoint.clone().accept().await {
-                let (peer_id, alpn, conn) = accept_conn(conn).await?;
-                tracing::info!(
-                    "new connection from {peer_id} with ALPN {alpn} (coming from {})",
-                    conn.remote_address()
-                );
-                match alpn.as_bytes() {
-                    ALPN_APPA_KEY_VALUE_FETCH => {
-                        let (mut send, mut recv) = conn.accept_bi().await?;
-                        tracing::info!("Waiting for data...");
-                        let msg = recv.read_to_end(100).await?;
-                        tracing::info!("Got data!");
-                        let key = String::from_utf8(msg)?;
-                        let value = appa.fs.store.get(&key)?;
-                        send.write_all(&postcard::to_stdvec(&value)?).await?;
-                        send.finish().await?;
-                    }
-                    ALPN_APPA_CAR_MIRROR_PULL => {
-                        let appa = appa.clone();
-                        let endpoint = Arc::clone(&endpoint);
-                        let config = car_mirror::common::Config::default();
-                        tokio::spawn(async move {
-                            let (send, recv) = conn.accept_bi().await?;
-                            tracing::debug!("accepted bi stream, waiting for data...");
-
-                            let mut recv = LengthDelimitedCodec::builder()
-                                .max_frame_length(128 * 1024)
-                                .new_read(recv);
-
-                            let mut send = LengthDelimitedCodec::builder()
-                                .max_frame_length(config.receive_maximum)
-                                .new_write(send);
-
-                            loop {
-                                let typ = endpoint
-                                    .connection_info(peer_id)
-                                    .await?
-                                    .map(|info| info.conn_type.to_string())
-                                    .unwrap_or("None".into());
-                                tracing::info!("Endpoint connection type: {typ}");
-
-                                let Some(message) = recv.try_next().await? else {
-                                    tracing::info!("Got EOF, closing.");
-                                    return Ok::<_, anyhow::Error>(());
-                                };
-                                tracing::info!("got pull message");
-
-                                let (root, request) =
-                                    postcard::from_bytes::<PullMsg>(&message)?.into_parts()?;
-
-                                tracing::info!("decoded msg");
-
-                                let response = car_mirror::pull::response(
-                                    root,
-                                    request,
-                                    &config,
-                                    &appa.fs.store,
-                                    &NoCache,
-                                )
-                                .await?;
-
-                                tracing::info!("Sending response ({} bytes)", response.bytes.len());
-                                send.send(response.bytes).await?;
-                                tracing::info!("Sent.");
-                            }
-                        });
-                    }
-                    _ => {
-                        println!("Unsupported protocol identifier (ALPN): {alpn}");
-                    }
-                }
-            }
+            listen().await?;
         }
         Commands::Sync { ticket } => {
-            let ticket: NodeTicket = Ticket::deserialize(ticket.as_ref())?;
-            let store = Flatfs::new(ROOT_DIR)?;
-            let config = car_mirror::common::Config::default();
-
-            let endpoint = MagicEndpoint::builder()
-                .alpns(vec![
-                    ALPN_APPA_CAR_MIRROR_PULL.to_vec(),
-                    ALPN_APPA_KEY_VALUE_FETCH.to_vec(),
-                ])
-                .bind(0)
-                .await?;
-
-            tracing::info!("Opening connection");
-            let connection = endpoint
-                .connect(ticket.node_addr().clone(), ALPN_APPA_KEY_VALUE_FETCH)
-                .await?;
-
-            let (mut send, mut recv) = connection.open_bi().await?;
-            send.write_all(DATA_ROOT.as_bytes()).await?;
-            send.finish().await?;
-            let Some(root_bytes): Option<Vec<u8>> =
-                postcard::from_bytes(&recv.read_to_end(100).await?)?
-            else {
-                println!("No data root on remote peer.");
-                return Ok(());
-            };
-            let root = Cid::read_bytes(Cursor::new(root_bytes))?;
-
-            println!("Fetched data root: {root}");
-
-            let connection = endpoint
-                .connect(ticket.node_addr().clone(), ALPN_APPA_KEY_VALUE_FETCH)
-                .await?;
-
-            let (mut send, mut recv) = connection.open_bi().await?;
-            send.write_all(PRIVATE_ACCESS_KEY.as_bytes()).await?;
-            send.finish().await?;
-            let Some(access_key_bytes): Option<Vec<u8>> =
-                postcard::from_bytes(&recv.read_to_end(200).await?)?
-            else {
-                println!("Missing access key.");
-                return Ok(());
-            };
-            println!("Fetched access key.");
-
-            let connection = endpoint
-                .connect(ticket.node_addr().clone(), ALPN_APPA_CAR_MIRROR_PULL)
-                .await?;
-
-            let (send, recv) = connection.open_bi().await?;
-            let mut send = LengthDelimitedCodec::builder()
-                .max_frame_length(128 * 1024)
-                .new_write(send);
-            let mut recv = LengthDelimitedCodec::builder()
-                .max_frame_length(config.receive_maximum)
-                .new_read(recv);
-
-            let mut last_response = None;
-            loop {
-                let req = car_mirror::pull::request(root, last_response, &config, &store, &NoCache)
-                    .await?;
-                if req.indicates_finished() {
-                    println!("Done!");
-                    store.put(PRIVATE_ACCESS_KEY, &access_key_bytes)?;
-                    store.put(DATA_ROOT, root.to_bytes())?;
-                    break;
-                }
-                let msg = postcard::to_stdvec(&PullMsg::new(root, req))?;
-                tracing::info!("Sending pull msg");
-                send.send(msg.into()).await?;
-                tracing::info!("Pull msg sent, waiting for response");
-
-                let Some(bytes) = recv.try_next().await? else {
-                    println!("Prematurely closed stream! Aborting.");
-                    break;
-                };
-                tracing::info!("Response received, {} bytes", bytes.len());
-                let response = CarFile {
-                    bytes: bytes.into(),
-                };
-
-                last_response = Some(response);
-            }
+            sync(ticket).await?;
         }
     }
 
     Ok(())
-}
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-struct PullMsg {
-    root: Vec<u8>,
-    resources: Vec<Vec<u8>>,
-    bloom: Bloom,
-}
-
-impl PullMsg {
-    fn new(root: Cid, request: PullRequest) -> Self {
-        Self {
-            root: root.to_bytes(),
-            bloom: request.bloom,
-            resources: request.resources.iter().map(Cid::to_bytes).collect(),
-        }
-    }
-
-    fn into_parts(self) -> Result<(Cid, PullRequest)> {
-        let root = Cid::read_bytes(Cursor::new(self.root))?;
-        let resources = self
-            .resources
-            .iter()
-            .map(|cid| Cid::read_bytes(Cursor::new(cid)))
-            .collect::<Result<Vec<_>, _>>()?;
-        Ok((
-            root,
-            PullRequest {
-                resources,
-                bloom: self.bloom,
-            },
-        ))
-    }
-}
-
-#[derive(Debug, Clone)]
-struct Appa {
-    fs: RootTree<Flatfs>,
-    peer_key: SecretKey,
-}
-
-impl Appa {
-    pub async fn init() -> Result<Self> {
-        let mut root_tree = RootTree::empty(Flatfs::new(ROOT_DIR)?);
-
-        let access_key = root_tree.create_private_root(&["private".into()]).await?;
-        root_tree
-            .store
-            .put(PRIVATE_ACCESS_KEY, access_key.to_bytes()?)?;
-
-        let peer_key = SecretKey::generate();
-        root_tree
-            .store
-            .put(PEER_SECRET_KEY, peer_key.to_bytes().to_vec())?;
-
-        Ok(Self {
-            fs: root_tree,
-            peer_key,
-        })
-    }
-
-    pub async fn commit(&mut self) -> Result<()> {
-        let cid = self.fs.store().await?;
-        self.fs.store.put(DATA_ROOT, cid.to_bytes())?;
-        Ok(())
-    }
-
-    pub async fn load() -> Result<Self> {
-        let bs = Flatfs::new(ROOT_DIR)?;
-
-        let data_root_entry = bs.get(DATA_ROOT)?.ok_or(anyhow!("No data root"))?;
-        let data_root = Cid::read_bytes(Cursor::new(data_root_entry))?;
-
-        let mut root_tree = RootTree::load(&data_root, bs).await?;
-
-        let access_key_bytes = &root_tree
-            .store
-            .get(PRIVATE_ACCESS_KEY)?
-            .ok_or(anyhow!("No access key"))?;
-        let access_key = AccessKey::parse(access_key_bytes)?;
-
-        root_tree
-            .load_private_root(&["private".into()], &access_key)
-            .await?;
-
-        let peer_key_bytes = root_tree.store.get(PEER_SECRET_KEY)?.unwrap_or_else(|| {
-            println!("No secret key for peering found - generating a new one.");
-            SecretKey::generate().to_bytes().to_vec()
-        });
-        let peer_key = SecretKey::from_bytes(
-            &peer_key_bytes
-                .try_into()
-                .map_err(|b: Vec<u8>| anyhow!("Wrong secret key len: {}", b.len()))?,
-        );
-        root_tree.store.put(PEER_SECRET_KEY, peer_key.to_bytes())?;
-
-        Ok(Self {
-            fs: root_tree,
-            peer_key,
-        })
-    }
 }
 
 /// converts a canonicalized relative path to a string, returning an error if
