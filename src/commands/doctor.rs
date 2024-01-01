@@ -28,6 +28,15 @@ pub async fn doctor(item: String) -> Result<()> {
             let ipld =
                 Ipld::decode(codec, &mut Cursor::new(block)).context("Couldn't parse block")?;
             println!("{ipld:#?}");
+
+            let mut refs = Vec::new();
+            ipld.references(&mut refs);
+            if !refs.is_empty() {
+                println!("References detected ({}):", refs.len());
+                for r in refs {
+                    println!(" - {r}");
+                }
+            }
         }
 
         let data_root_entry = store

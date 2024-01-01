@@ -5,12 +5,13 @@ use crate::state::{
     Appa, ALPN_APPA_CAR_MIRROR_PULL, ALPN_APPA_KEY_VALUE_FETCH, DATA_ROOT, PRIVATE_ACCESS_KEY,
     ROOT_DIR,
 };
+use crate::store::cache_missing::CacheMissing;
 use crate::store::flatfs::Flatfs;
 use anyhow::Result;
 use car_mirror::common::CarFile;
-use car_mirror::dag_walk::DagWalk;
+use car_mirror::incremental_verification::IncrementalDagVerification;
 use car_mirror::messages::{Bloom, PullRequest};
-use car_mirror::traits::NoCache;
+use car_mirror::traits::InMemoryCache;
 use cid::Cid;
 use futures::{SinkExt, TryStreamExt};
 use iroh_base::ticket::Ticket;
@@ -55,6 +56,7 @@ impl PullMsg {
 
 pub async fn listen() -> Result<()> {
     let appa = Appa::load().await?;
+    let cache = InMemoryCache::new(10_000, 150_000);
 
     let endpoint = Arc::new(
         MagicEndpoint::builder()
@@ -90,7 +92,8 @@ pub async fn listen() -> Result<()> {
             ALPN_APPA_CAR_MIRROR_PULL => {
                 let appa = appa.clone();
                 let endpoint = Arc::clone(&endpoint);
-                let config = car_mirror::common::Config::default();
+                let config = car_mirror_config();
+                let cache = cache.clone();
                 tokio::spawn(async move {
                     let (send, recv) = conn.accept_bi().await?;
                     tracing::debug!("accepted bi stream, waiting for data...");
@@ -127,7 +130,7 @@ pub async fn listen() -> Result<()> {
                             request,
                             &config,
                             &appa.fs.store,
-                            &NoCache,
+                            &cache,
                         )
                         .await?;
 
@@ -147,8 +150,9 @@ pub async fn listen() -> Result<()> {
 
 pub async fn sync(ticket: String) -> Result<()> {
     let ticket: NodeTicket = Ticket::deserialize(ticket.as_ref())?;
-    let store = Flatfs::new(ROOT_DIR)?;
-    let config = car_mirror::common::Config::default();
+    let store = CacheMissing::new(150_000, Flatfs::new(ROOT_DIR)?);
+    let config = car_mirror_config();
+    let cache = InMemoryCache::new(10_000, 150_000);
 
     let endpoint = MagicEndpoint::builder()
         .alpns(vec![
@@ -204,15 +208,17 @@ pub async fn sync(ticket: String) -> Result<()> {
 
     let mut last_response = None;
     loop {
-        let req = car_mirror::pull::request(root, last_response, &config, &store, &NoCache).await?;
+        let dag_verification = IncrementalDagVerification::new([root], &store, &cache).await?;
+        tracing::info!(
+            num_blocks_want = dag_verification.want_cids.len(),
+            num_blocks_have = dag_verification.have_cids.len(),
+            "State of transfer"
+        );
+        let req = car_mirror::pull::request(root, last_response, &config, &store, &cache).await?;
         if req.indicates_finished() {
-            let block_count = DagWalk::breadth_first([root])
-                .stream(&store, &NoCache)
-                .try_fold(0, |i, _| futures::future::ok(i + 1))
-                .await?;
-            println!("Done! Fetched {block_count} blocks.");
-            store.put(PRIVATE_ACCESS_KEY, &access_key_bytes)?;
-            store.put(DATA_ROOT, root.to_bytes())?;
+            println!("Done!");
+            store.inner.put(PRIVATE_ACCESS_KEY, &access_key_bytes)?;
+            store.inner.put(DATA_ROOT, root.to_bytes())?;
             break;
         }
         let msg = postcard::to_stdvec(&PullMsg::new(root, req))?;
@@ -232,4 +238,11 @@ pub async fn sync(ticket: String) -> Result<()> {
         last_response = Some(response);
     }
     Ok(())
+}
+
+pub fn car_mirror_config() -> car_mirror::common::Config {
+    let mut config = car_mirror::common::Config::default();
+    config.receive_maximum *= 100;
+    config.send_minimum *= 180;
+    config
 }

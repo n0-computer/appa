@@ -76,7 +76,7 @@ enum Commands {
         #[arg(value_name = "TICKET")]
         ticket: String,
     },
-    /// Debugging commands
+    /// The appa debugging tool
     Doctor {
         /// Item to debug, e.g. CID or store key
         #[arg(value_name = "ITEM")]
