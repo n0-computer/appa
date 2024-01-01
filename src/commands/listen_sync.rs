@@ -208,13 +208,15 @@ pub async fn sync(ticket: String) -> Result<()> {
 
     let mut last_response = None;
     loop {
+        let req = car_mirror::pull::request(root, last_response, &config, &store, &cache).await?;
+
         let dag_verification = IncrementalDagVerification::new([root], &store, &cache).await?;
         tracing::info!(
             num_blocks_want = dag_verification.want_cids.len(),
             num_blocks_have = dag_verification.have_cids.len(),
             "State of transfer"
         );
-        let req = car_mirror::pull::request(root, last_response, &config, &store, &cache).await?;
+
         if req.indicates_finished() {
             println!("Done!");
             store.inner.put(PRIVATE_ACCESS_KEY, &access_key_bytes)?;
