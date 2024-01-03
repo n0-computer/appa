@@ -13,7 +13,7 @@ use wnfs::common::Storable;
 
 #[derive(Debug, Parser)]
 #[command(name = "appa")]
-#[command(about = "A simple wnfs interface, syncing with iroh", long_about = None)]
+#[command(about = "A simple wnfs interface, syncing with iroh-net and car-mirror", long_about = None)]
 struct Cli {
     #[command(subcommand)]
     command: Commands,

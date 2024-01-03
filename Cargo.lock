@@ -161,6 +161,7 @@ dependencies = [
  "libipld",
  "postcard",
  "quick_cache",
+ "quinn",
  "rand",
  "serde",
  "tempfile",
@@ -490,10 +491,9 @@ dependencies = [
 [[package]]
 name = "car-mirror"
 version = "0.1.0"
-source = "git+https://github.com/fission-codes/rs-car-mirror.git?branch=matheus23/upgrade-wnfs#1645c9064f8a2db2be7a7bcba817bf1c67ccad56"
+source = "git+https://github.com/fission-codes/rs-car-mirror.git?branch=matheus23/streaming#956a5c0d6da42f53e2c42f9c344f4468d5a65511"
 dependencies = [
  "anyhow",
- "async-stream",
  "async-trait",
  "bytes",
  "deterministic-bloom",
@@ -507,7 +507,6 @@ dependencies = [
  "thiserror",
  "tokio",
  "tracing",
- "tracing-subscriber",
  "wnfs-common",
 ]
 
