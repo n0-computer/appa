@@ -135,7 +135,7 @@ impl NFSFileSystem for AppaNfs {
     /// Note that offset/count may go past the end of the file and that
     /// in that case, all bytes till the end of file are returned.
     /// EOF must be flagged if the end of the file is reached by the read.
-    #[tracing::instrument(skip(self))]
+    #[tracing::instrument(skip(self), err(Debug))]
     async fn read(
         &self,
         id: fileid3,
@@ -162,9 +162,12 @@ impl NFSFileSystem for AppaNfs {
             .await
             .map_err(server_fault)?;
 
-        // TODO uuuhm this needs to be better
-        // I need a file.size() function in rs-wnfs
-        let is_eof = bytes.len() < count;
+        let size = file.size(&self.appa.fs.store).await.map_err(server_fault)?;
+
+        let is_eof = offset as usize + count >= size;
+
+        tracing::debug!(offset, count, size, is_eof, "File read subset");
+
         Ok((bytes, is_eof))
     }
 
