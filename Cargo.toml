@@ -31,6 +31,7 @@ iroh-base = "0.12.0"
 tokio-util = { version = "0.7.10", features = ["codec"] }
 async-recursion = "1.0.5"
 quick_cache = "0.4.0"
+nfsserve = { git = "https://github.com/xetdata/nfsserve", revision = "46322e7823ccb3f0a2e549dfa91fbf7dada9c42a" }
 quinn = "0.10.2"
 
 # enable the "rug" feature (using GMP) for rs-wnfs, speeding up nameaccumulator operations

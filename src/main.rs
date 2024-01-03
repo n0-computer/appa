@@ -3,8 +3,10 @@ use std::path::{Component, Path};
 use anyhow::{Context as _, Result};
 use appa::commands::doctor::doctor;
 use appa::commands::listen_sync::{listen, sync};
+use appa::nfs::AppaNfs;
 use appa::state::Appa;
 use futures::TryStreamExt;
+use nfsserve::tcp::{NFSTcp, NFSTcpListener};
 use tokio::io::AsyncWriteExt;
 
 use clap::{Parser, Subcommand};
@@ -82,6 +84,8 @@ enum Commands {
         #[arg(value_name = "ITEM")]
         item: String,
     },
+    /// Run an NFS server for the appa filesystem locally
+    Nfsserve,
 }
 
 #[tokio::main]
@@ -169,6 +173,16 @@ async fn main() -> Result<()> {
         }
         Commands::Sync { ticket } => {
             sync(ticket).await?;
+        }
+        Commands::Nfsserve => {
+            const HOSTPORT: u32 = 11111;
+            let appa = Appa::load().await?;
+            let listener =
+                NFSTcpListener::bind(&format!("127.0.0.1:{HOSTPORT}"), AppaNfs::new(appa))
+                    .await
+                    .unwrap();
+            tracing::info!("Staring serve");
+            listener.handle_forever().await?;
         }
     }
 
