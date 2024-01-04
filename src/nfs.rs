@@ -6,7 +6,7 @@ use nfsserve::{
     vfs::{DirEntry, NFSFileSystem, ReadDirResult, VFSCapabilities},
 };
 use std::{collections::BTreeMap, fmt::Debug, sync::Arc};
-use wnfs::public::PublicNode;
+use wnfs::{common::BlockStore, public::PublicNode};
 
 #[derive(Debug, Clone)]
 pub struct AppaNfs {
@@ -91,7 +91,7 @@ impl NFSFileSystem for AppaNfs {
         let mut path_map = self.path_map()?;
         let mut path = path_map.path_for(dirid)?.clone();
         let filename =
-            String::from_utf8(filename.0.clone()).map_err(return_err(nfsstat3::NFS3ERR_INVAL))?;
+            String::from_utf8(filename.0.clone()).map_err(return_err(nfsstat3::NFS3ERR_ACCES))?;
         path.push(filename);
         let id = path_map.id_for(&path);
         Ok(id)
@@ -120,7 +120,7 @@ impl NFSFileSystem for AppaNfs {
 
         tracing::debug!("gettattr success");
 
-        Ok(node_to_attr(id, &node))
+        node_to_attr(id, &node, &self.appa.fs.store).await
     }
 
     /// Sets the attributes of an id
@@ -164,7 +164,7 @@ impl NFSFileSystem for AppaNfs {
 
         let size = file.size(&self.appa.fs.store).await.map_err(server_fault)?;
 
-        let is_eof = offset as usize + count >= size;
+        let is_eof = offset + count as u64 >= size;
 
         tracing::debug!(offset, count, size, is_eof, "File read subset");
 
@@ -308,7 +308,7 @@ impl NFSFileSystem for AppaNfs {
                 entries.push(DirEntry {
                     fileid: id,
                     name: filename,
-                    attr: node_to_attr(id, node),
+                    attr: node_to_attr(id, node, &self.appa.fs.store).await?,
                 });
 
                 if entries.len() == max_entries {
@@ -362,27 +362,36 @@ fn to_nfstime(ts: &DateTime<Utc>) -> nfstime3 {
     }
 }
 
-fn node_to_attr(id: fileid3, node: &PublicNode) -> fattr3 {
-    let (ftype, mode, metadata) = match node {
-        PublicNode::File(file) => (ftype3::NF3REG, 0o755, file.get_metadata()),
-        PublicNode::Dir(dir) => (ftype3::NF3DIR, 0o777, dir.get_metadata()),
+async fn node_to_attr(
+    id: fileid3,
+    node: &PublicNode,
+    store: &impl BlockStore,
+) -> Result<fattr3, nfsstat3> {
+    let (ftype, mode, size, metadata) = match node {
+        PublicNode::File(file) => (
+            ftype3::NF3REG,
+            0o755,
+            file.size(store).await.map_err(server_fault)? as u64,
+            file.get_metadata(),
+        ),
+        PublicNode::Dir(dir) => (ftype3::NF3DIR, 0o777, 0, dir.get_metadata()),
     };
     let created = metadata.get_created().unwrap_or_default();
     let modified = metadata.get_modified().unwrap_or_default();
 
-    fattr3 {
+    Ok(fattr3 {
         ftype,
         mode,
         nlink: 1,
         uid: 507,
         gid: 507,
-        size: 1000, // TODO
-        used: 1000, // TODO
+        size,
+        used: size,
         rdev: specdata3::default(),
         fsid: 0,
         fileid: id,
         atime: to_nfstime(&modified),
         mtime: to_nfstime(&modified),
         ctime: to_nfstime(&created),
-    }
+    })
 }
