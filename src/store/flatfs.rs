@@ -72,7 +72,7 @@ impl Flatfs {
 
         // Rename after successfull write
         retry(|| fs::rename(&temp_filepath, &filepath))
-            .with_context(|| format!("Failed to reaname: {temp_filepath:?} -> {filepath:?}"))?;
+            .with_context(|| format!("Failed to rename: {temp_filepath:?} -> {filepath:?}"))?;
 
         self.disk_usage
             .fetch_add(value.len() as u64, Ordering::SeqCst);
