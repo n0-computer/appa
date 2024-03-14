@@ -77,6 +77,9 @@ enum Commands {
         /// The ticket printed on the other node's listen command
         #[arg(value_name = "TICKET")]
         ticket: String,
+        /// The path of a directory on the other node to sync from
+        #[arg(value_name = "PATH")]
+        path: String,
     },
     /// The appa debugging tool
     Doctor {
@@ -171,8 +174,8 @@ async fn main() -> Result<()> {
         Commands::Listen => {
             listen().await?;
         }
-        Commands::Sync { ticket } => {
-            sync(ticket).await?;
+        Commands::Sync { ticket, path } => {
+            sync(ticket, path).await?;
         }
         Commands::Nfsserve => {
             const HOSTPORT: u32 = 11111;

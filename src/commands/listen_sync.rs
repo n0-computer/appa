@@ -16,6 +16,7 @@ use iroh_net::ticket::NodeTicket;
 use iroh_net::{MagicEndpoint, NodeId};
 use quinn::Connection;
 use std::io::Cursor;
+use std::path::Path;
 use std::sync::Arc;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio_util::codec::LengthDelimitedCodec;
@@ -54,7 +55,7 @@ impl PullMsg {
 }
 
 pub async fn listen() -> Result<()> {
-    let appa = Appa::load().await?;
+    let mut appa = Appa::load().await?;
     let cache = InMemoryCache::new(10_000, 150_000);
 
     let endpoint = Arc::new(
@@ -79,7 +80,7 @@ pub async fn listen() -> Result<()> {
         );
 
         if let Err(e) =
-            accept_connection(peer_id, alpn.as_bytes(), conn, &appa, &endpoint, &cache).await
+            accept_connection(peer_id, alpn.as_bytes(), conn, &mut appa, &endpoint, &cache).await
         {
             tracing::error!(?e, alpn, "Failed running protocol. Continuing.");
         }
@@ -91,7 +92,7 @@ async fn accept_connection(
     peer_id: NodeId,
     alpn: &[u8],
     conn: Connection,
-    appa: &Appa,
+    appa: &mut Appa,
     endpoint: &Arc<MagicEndpoint>,
     cache: &InMemoryCache,
 ) -> Result<(), anyhow::Error> {
@@ -102,7 +103,19 @@ async fn accept_connection(
             let msg = recv.read_to_end(100).await?;
             tracing::info!("Got data!");
             let key = String::from_utf8(msg)?;
-            let value = appa.fs.store.get(&key)?;
+            let path = Path::new(&key)
+                .components()
+                .map(|c| c.as_os_str().to_string_lossy().to_string())
+                .collect::<Vec<String>>();
+            let sync_private_root =
+                path == vec![DATA_ROOT.to_string()] || path == vec![PRIVATE_ACCESS_KEY.to_string()];
+            let value: Option<Vec<u8>> = match sync_private_root {
+                true => appa.fs.store.get(&key)?,
+                false => {
+                    let access_key = appa.fs.store_private_root(&path).await?;
+                    Some(access_key.to_bytes()?)
+                }
+            };
             send.write_all(&postcard::to_stdvec(&value)?).await?;
             send.finish().await?;
         }
@@ -170,11 +183,16 @@ async fn server_respond_pull(
     Ok(())
 }
 
-pub async fn sync(ticket: String) -> Result<()> {
+pub async fn sync(ticket: String, path: String) -> Result<()> {
     let ticket: NodeTicket = Ticket::deserialize(ticket.as_ref())?;
     let store = CacheMissing::new(150_000, Flatfs::new(ROOT_DIR)?);
     let config = car_mirror_config();
     let cache = InMemoryCache::new(10_000, 150_000);
+    let sync_private_root = Path::new(&path)
+        .components()
+        .map(|c| c.as_os_str().to_string_lossy().to_string())
+        .collect::<Vec<String>>()
+        == vec!["private".to_string()];
 
     let endpoint = MagicEndpoint::builder()
         .alpns(vec![
@@ -206,7 +224,10 @@ pub async fn sync(ticket: String) -> Result<()> {
         .await?;
 
     let (mut send, mut recv) = connection.open_bi().await?;
-    send.write_all(PRIVATE_ACCESS_KEY.as_bytes()).await?;
+    match sync_private_root {
+        true => send.write_all(PRIVATE_ACCESS_KEY.as_bytes()).await?,
+        false => send.write_all(path.as_bytes()).await?,
+    }
     send.finish().await?;
     let Some(access_key_bytes): Option<Vec<u8>> =
         postcard::from_bytes(&recv.read_to_end(200).await?)?
