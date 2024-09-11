@@ -5,27 +5,41 @@ edition = "2021"
 license = "MIT/Apache-2.0"
 
 [dependencies]
-anyhow = "1.0.70"
-async-trait = "0.1.68"
-backoff = "0.4.0"
+anyhow = "1"
+async-trait = "0.1"
+backoff = "0.4"
 futures = "0.3.25"
 bytes = "1.4"
-blake3 = "1.3.3"
+blake3 = "1.3"
 chrono = "0.4.24"
-cid = "0.10.1"
-clap = { version = "4.2.2", features = ["derive"] }
+car-mirror = { git = "https://github.com/fission-codes/rs-car-mirror.git", rev = "ec0a4d56", features = ["quick_cache"] }
+cid = "0.10"
+clap = { version = "4.2", features = ["derive"] }
 ignore = "0.4.20"
-iroh = { git = "https://github.com/n0-computer/iroh.git", branch = "ramfox/porcelain"}
-libipld = "0.16.0"
+libipld = "0.16"
 serde = { version = "1", features = ["derive"] }
-postcard = { version = "1.0.4", features = ["use-std"] }
-rand = "0.8.5"
+postcard = { version = "1", features = ["use-std"] }
+rand = "0.8"
 tokio = { version = "1.27.0", features = ["full"] }
-wnfs = "0.1.20"
+wnfs = { version = "0.1.27", git = "https://github.com/wnfs-wg/rs-wnfs.git", branch = "matheus23/root-tree" }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tracing = "0.1.37"
-hex = "0.4.3"
-walkdir = "2.3.3"
+hex = "0.4"
+walkdir = "2.3"
+iroh-net = "0.12.0"
+iroh-base = "0.12.0"
+tokio-util = { version = "0.7.10", features = ["codec"] }
+async-recursion = "1.0.5"
+quick_cache = "0.4.0"
+nfsserve = { git = "https://github.com/xetdata/nfsserve", revision = "46322e7823ccb3f0a2e549dfa91fbf7dada9c42a" }
+quinn = "0.10.2"
+
+# enable the "rug" feature (using GMP) for rs-wnfs, speeding up nameaccumulator operations
+[target.'cfg(unix)'.dependencies]
+wnfs-nameaccumulator = { git = "https://github.com/wnfs-wg/rs-wnfs.git", branch = "matheus23/root-tree", default-features = false, features = ["rug"] }
 
 [dev-dependencies]
 tempfile = "3.5.0"
+
+[patch.crates-io]
+wnfs-common = { git = "https://github.com/wnfs-wg/rs-wnfs.git", branch = "matheus23/root-tree" }

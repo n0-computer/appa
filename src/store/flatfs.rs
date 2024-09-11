@@ -1,5 +1,7 @@
+use super::shard::{self, Shard};
+use anyhow::{anyhow, Context, Result};
+use bytes::Bytes;
 use std::{
-    borrow::Cow,
     fs, io,
     path::{Path, PathBuf},
     sync::{
@@ -8,10 +10,7 @@ use std::{
     },
     time::{Duration, SystemTime},
 };
-
-use anyhow::{anyhow, Context, Result};
-
-use super::shard::{self, Shard};
+use wnfs::common::BlockStoreError;
 
 #[derive(Debug, Clone)]
 pub struct Flatfs {
@@ -242,25 +241,21 @@ impl Flatfs {
             .build()
     }
 
-    pub(crate) fn get_block_sync(&self, cid: cid::Cid) -> Result<Vec<u8>> {
+    pub(crate) fn get_block_sync(&self, cid: cid::Cid) -> Result<Bytes> {
         match self.get(&Self::key_for_cid(cid)) {
-            Ok(Some(res)) => Ok(res),
-            Ok(None) => Err(wnfs::error::FsError::NotFound.into()),
+            Ok(Some(res)) => Ok(Bytes::from(res)),
+            Ok(None) => Err(BlockStoreError::CIDNotFound(cid).into()),
             Err(err) => Err(err),
         }
     }
 
-    pub(crate) fn put_block_sync(
-        &self,
-        bytes: Vec<u8>,
-        codec: libipld::IpldCodec,
-    ) -> Result<cid::Cid> {
+    pub(crate) fn put_block_sync(&self, bytes: Bytes, codec: u64) -> Result<cid::Cid> {
         let hash = cid::multihash::Multihash::wrap(
             cid::multihash::Code::Blake3_256.into(),
             blake3::hash(&bytes).as_bytes(),
         )
         .expect("invalid multihash");
-        let cid = cid::Cid::new_v1(codec.into(), hash);
+        let cid = cid::Cid::new_v1(codec, hash);
         let key = Self::key_for_cid(cid);
         self.put(&key, bytes)?;
 
@@ -401,18 +396,17 @@ fn calculate_disk_usage<P: AsRef<Path>>(path: P) -> Result<u64> {
     Ok(disk_usage)
 }
 
-#[async_trait::async_trait(?Send)]
+#[async_trait::async_trait]
 impl wnfs::common::BlockStore for Flatfs {
-    async fn get_block<'a>(&'a self, cid: &cid::Cid) -> Result<Cow<'a, Vec<u8>>> {
+    async fn get_block<'a>(&'a self, cid: &cid::Cid) -> Result<Bytes> {
         let cid = *cid;
         let self = self.clone();
-        Ok(Cow::Owned(
-            tokio::task::spawn_blocking(move || self.get_block_sync(cid)).await??,
-        ))
+        Ok(tokio::task::spawn_blocking(move || self.get_block_sync(cid)).await??)
     }
 
-    async fn put_block(&mut self, bytes: Vec<u8>, codec: libipld::IpldCodec) -> Result<cid::Cid> {
+    async fn put_block(&self, bytes: impl Into<Bytes> + Send, codec: u64) -> Result<cid::Cid> {
         let self = self.clone();
+        let bytes = bytes.into();
         tokio::task::spawn_blocking(move || self.put_block_sync(bytes, codec)).await?
     }
 }
@@ -426,11 +420,11 @@ mod tests {
         use wnfs::common::BlockStore;
 
         let dir = tempfile::tempdir().unwrap();
-        let mut flatfs = Flatfs::new(dir.path()).unwrap();
+        let flatfs = Flatfs::new(dir.path()).unwrap();
 
         let data = b"hello world";
         let cid = flatfs
-            .put_block(data.to_vec(), libipld::IpldCodec::Raw)
+            .put_block(data.to_vec(), libipld::IpldCodec::Raw.into())
             .await?;
         let res = flatfs.get_block(&cid).await?;
         assert_eq!(&res[..], data);
